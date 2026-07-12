@@ -647,7 +647,7 @@ function sourceTreeHash(goClosure, typescriptClosure) {
   }
   const hash = createHash("sha256")
   for (const [path, metadata] of Object.entries(files).sort(([a], [b]) =>
-    a.localeCompare(b)
+    a === b ? 0 : a < b ? -1 : 1
   )) {
     hash.update(path)
     hash.update("\0")
