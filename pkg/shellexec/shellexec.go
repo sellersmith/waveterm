@@ -20,6 +20,7 @@ import (
 	"maps"
 
 	"github.com/creack/pty"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/blocklogger"
 	"github.com/wavetermdev/waveterm/pkg/jobcontroller"
 	"github.com/wavetermdev/waveterm/pkg/panichandler"
@@ -111,10 +112,77 @@ func checkCwd(cwd string) error {
 	if cwd == "" {
 		return fmt.Errorf("cwd is empty")
 	}
-	if _, err := os.Stat(cwd); err != nil {
+	fileInfo, err := os.Stat(cwd)
+	if err != nil {
 		return fmt.Errorf("error statting cwd %q: %w", cwd, err)
 	}
+	if !fileInfo.IsDir() {
+		return fmt.Errorf("cwd %q is not a directory", cwd)
+	}
 	return nil
+}
+
+var embeddedLocalShellEnvAllowlist = []string{
+	"PATH",
+	"HOME",
+	"USER",
+	"LOGNAME",
+	"SHELL",
+	"TERM",
+	"LANG",
+	"LC_ALL",
+	"LC_CTYPE",
+	"TMPDIR",
+	"TZ",
+	"COLORTERM",
+	"TERM_PROGRAM",
+}
+
+const embeddedLocalShellFallbackPath = "/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin"
+
+func buildLocalShellEnvironment(
+	config policy.Config,
+	environ func() []string,
+	getenv func(string) string,
+) []string {
+	if !config.Embedded {
+		return append([]string(nil), environ()...)
+	}
+
+	values := map[string]string{
+		"PATH": embeddedLocalShellFallbackPath,
+		"TERM": shellutil.DefaultTermType,
+	}
+	for _, name := range embeddedLocalShellEnvAllowlist {
+		if value := getenv(name); value != "" {
+			values[name] = value
+		}
+	}
+
+	environment := make([]string, 0, len(values))
+	for _, name := range embeddedLocalShellEnvAllowlist {
+		if value := values[name]; value != "" {
+			environment = append(environment, name+"="+value)
+		}
+	}
+	return environment
+}
+
+func currentLocalShellEnvironment() []string {
+	return buildLocalShellEnvironment(policy.Current(), os.Environ, os.Getenv)
+}
+
+func resolveLocalShellCwd(config policy.Config, requestedCwd string, homeDir string) string {
+	if config.Embedded {
+		if config.ProjectRoot != "" && checkCwd(config.ProjectRoot) == nil {
+			return config.ProjectRoot
+		}
+		return homeDir
+	}
+	if checkCwd(requestedCwd) == nil {
+		return requestedCwd
+	}
+	return homeDir
 }
 
 type PipePty struct {
@@ -619,7 +687,7 @@ func StartLocalShellProc(logCtx context.Context, termSize waveobj.TermSize, cmdS
 		}
 		blocklogger.Debugf(logCtx, "[conndebug] shell:%s shellOpts:%v\n", shellPath, shellOpts)
 		ecmd = exec.Command(shellPath, shellOpts...)
-		ecmd.Env = os.Environ()
+		ecmd.Env = currentLocalShellEnvironment()
 		if shellType == shellutil.ShellType_zsh {
 			shellutil.UpdateCmdEnv(ecmd, map[string]string{"ZDOTDIR": shellutil.GetLocalZshZDotDir()})
 		}
@@ -627,7 +695,7 @@ func StartLocalShellProc(logCtx context.Context, termSize waveobj.TermSize, cmdS
 		isShell = false
 		shellOpts = append(shellOpts, "-c", cmdStr)
 		ecmd = exec.Command(shellPath, shellOpts...)
-		ecmd.Env = os.Environ()
+		ecmd.Env = currentLocalShellEnvironment()
 	}
 
 	packedToken, err := cmdOpts.SwapToken.PackForClient()
@@ -665,12 +733,11 @@ func StartLocalShellProc(logCtx context.Context, termSize waveobj.TermSize, cmdS
 		shellutil.UpdateCmdEnv(ecmd, varsToReplace)
 	}
 
-	if cmdOpts.Cwd != "" {
-		ecmd.Dir = cmdOpts.Cwd
-	}
-	if cwdErr := checkCwd(ecmd.Dir); cwdErr != nil {
-		ecmd.Dir = wavebase.GetHomeDir()
-	}
+	ecmd.Dir = resolveLocalShellCwd(
+		policy.Current(),
+		cmdOpts.Cwd,
+		wavebase.GetHomeDir(),
+	)
 	envToAdd := shellutil.WaveshellLocalEnvVars(shellutil.DefaultTermType)
 	if os.Getenv("LANG") == "" {
 		envToAdd["LANG"] = wavebase.DetermineLang()
@@ -693,7 +760,7 @@ func StartLocalShellProc(logCtx context.Context, termSize waveobj.TermSize, cmdS
 }
 
 func RunSimpleCmdInPty(ecmd *exec.Cmd, termSize waveobj.TermSize) ([]byte, error) {
-	ecmd.Env = os.Environ()
+	ecmd.Env = currentLocalShellEnvironment()
 	shellutil.UpdateCmdEnv(ecmd, shellutil.WaveshellLocalEnvVars(shellutil.DefaultTermType))
 	if termSize.Rows == 0 || termSize.Cols == 0 {
 		termSize.Rows = shellutil.DefaultTermRows

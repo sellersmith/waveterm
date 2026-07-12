@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hyprlane hosted terminal surface</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-monospace, monospace;
+      }
+      body {
+        margin: 0;
+        background: #171717;
+        color: #d4d4d4;
+      }
+      main {
+        display: grid;
+        min-height: 100vh;
+        place-items: center;
+      }
+      p {
+        opacity: 0.72;
+      }
+    </style>
+  </head>
+  <body>
+    <main><p id="status">Loading hosted surface…</p></main>
+    <script type="module" src="./surface-probe.ts"></script>
+  </body>
+</html>

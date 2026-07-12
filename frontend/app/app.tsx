@@ -206,7 +206,15 @@ function AppFocusHandler() {
 
 const MacOSFirstClickHandler = () => {
     useEffect(() => {
-        if (PLATFORM !== "darwin") {
+        // The native app uses one BrowserWindow, where macOS sends this focus
+        // transition only when the user activates the application. Hyprlane
+        // hosts each native Wave tab in its own WebContentsView, so the same
+        // transition occurs while switching embedded tabs and would swallow
+        // an ordinary tab click. The preload bridge exists only in that host.
+        if (
+            PLATFORM !== "darwin" ||
+            (window as Window & { hyprlaneWave?: unknown }).hyprlaneWave != null
+        ) {
             return;
         }
         let windowFocusTime: number = null;

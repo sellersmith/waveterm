@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/blockcontroller"
 	"github.com/wavetermdev/waveterm/pkg/filestore"
 	"github.com/wavetermdev/waveterm/pkg/tsgen/tsgenmeta"
@@ -38,11 +39,11 @@ func (bs *BlockService) GetControllerStatus(ctx context.Context, blockId string)
 func (*BlockService) SaveTerminalState_Meta() tsgenmeta.MethodMeta {
 	return tsgenmeta.MethodMeta{
 		Desc:     "save the terminal state to a blockfile",
-		ArgNames: []string{"ctx", "blockId", "state", "stateType", "ptyOffset", "termSize"},
+		ArgNames: []string{"ctx", "blockId", "state", "stateType", "ptyOffset", "termSize", "generation"},
 	}
 }
 
-func (bs *BlockService) SaveTerminalState(ctx context.Context, blockId string, state string, stateType string, ptyOffset int64, termSize waveobj.TermSize) error {
+func (bs *BlockService) SaveTerminalState(ctx context.Context, blockId string, state string, stateType string, ptyOffset int64, termSize waveobj.TermSize, generation int64) error {
 	_, err := wstore.DBMustGet[*waveobj.Block](ctx, blockId)
 	if err != nil {
 		return err
@@ -50,17 +51,25 @@ func (bs *BlockService) SaveTerminalState(ctx context.Context, blockId string, s
 	if stateType != "full" && stateType != "preview" {
 		return fmt.Errorf("invalid state type: %q", stateType)
 	}
+	stateBytes, ptyOffset := filestore.BoundEmbeddedTerminalCache([]byte(state), ptyOffset)
+	if policy.IsEmbedded() {
+		termFile, err := filestore.WFS.Stat(ctx, blockId, "term")
+		if err != nil {
+			return fmt.Errorf("cannot validate terminal state generation: %w", err)
+		}
+		currentGeneration, ok := filestore.TerminalHistoryGeneration(termFile)
+		if !ok || generation != currentGeneration {
+			return fmt.Errorf("stale terminal state generation")
+		}
+	}
 	// ignore MakeFile error (already exists is ok)
 	filestore.WFS.MakeFile(ctx, blockId, "cache:term:"+stateType, nil, wshrpc.FileOpts{})
-	err = filestore.WFS.WriteFile(ctx, blockId, "cache:term:"+stateType, []byte(state))
-	if err != nil {
-		return fmt.Errorf("cannot save terminal state: %w", err)
-	}
 	fileMeta := wshrpc.FileMeta{
-		"ptyoffset": ptyOffset,
-		"termsize":  termSize,
+		"ptyoffset":  ptyOffset,
+		"termsize":   termSize,
+		"generation": generation,
 	}
-	err = filestore.WFS.WriteMeta(ctx, blockId, "cache:term:"+stateType, fileMeta, true)
+	err = filestore.WFS.WriteFileAndMeta(ctx, blockId, "cache:term:"+stateType, stateBytes, fileMeta)
 	if err != nil {
 		return fmt.Errorf("cannot save terminal state meta: %w", err)
 	}

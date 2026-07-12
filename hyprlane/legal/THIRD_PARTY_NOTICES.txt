@@ -1,0 +1,23 @@
+Hyprlane Wave-derived core third-party notices
+================================================
+This distribution contains software derived from Wave, copyright 2025
+Command Line Inc., licensed under the Apache License, Version 2.0. The
+upstream Apache license and NOTICE are included alongside this file.
+
+Hyprlane's integration changes the host, security policy, lifecycle,
+packaging, and product assets. Hyprlane is not affiliated with or endorsed by
+Command Line Inc. "Wave" and "WaveTerm" are used here only to identify the
+upstream source. No upstream Wave logo is distributed by this artifact.
+
+Compatibility assets
+--------------------
+
+* Inter variable font, copyright 2016 The Inter Project Authors, licensed
+  under the SIL Open Font License 1.1.
+* JetBrains Mono, copyright 2020 The JetBrains Mono Project Authors, licensed
+  under the SIL Open Font License 1.1.
+* Phosphor Icons, copyright 2020-2021 Phosphor Icons, licensed under the MIT
+  License.
+
+Readable copies of those licenses are included in legal/licenses. A complete
+machine-readable dependency inventory is included as legal/SBOM.spdx.json.

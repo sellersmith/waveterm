@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "packages": [
+    {
+      "name": "@fontsource-variable/inter",
+      "version": "5.2.8",
+      "license": "OFL-1.1"
+    },
+    {
+      "name": "@fontsource/jetbrains-mono",
+      "version": "5.2.8",
+      "license": "OFL-1.1"
+    },
+    {
+      "name": "@phosphor-icons/web",
+      "version": "2.1.2",
+      "license": "MIT"
+    }
+  ],
+  "fonts": [
+    {
+      "output": "fonts/inter-variable.woff2",
+      "package": "@fontsource-variable/inter",
+      "source": "files/inter-latin-wght-normal.woff2"
+    },
+    {
+      "output": "fonts/jetbrains-mono-v13-latin-200.woff2",
+      "package": "@fontsource/jetbrains-mono",
+      "source": "files/jetbrains-mono-latin-200-normal.woff2"
+    },
+    {
+      "output": "fonts/jetbrains-mono-v13-latin-700.woff2",
+      "package": "@fontsource/jetbrains-mono",
+      "source": "files/jetbrains-mono-latin-700-normal.woff2"
+    },
+    {
+      "output": "fonts/jetbrains-mono-v13-latin-regular.woff2",
+      "package": "@fontsource/jetbrains-mono",
+      "source": "files/jetbrains-mono-latin-400-normal.woff2"
+    },
+    {
+      "output": "fonts/hacknerdmono-bold.ttf",
+      "package": "@fontsource/jetbrains-mono",
+      "source": "files/jetbrains-mono-latin-700-normal.woff2"
+    },
+    {
+      "output": "fonts/hacknerdmono-bolditalic.ttf",
+      "package": "@fontsource/jetbrains-mono",
+      "source": "files/jetbrains-mono-latin-700-italic.woff2"
+    },
+    {
+      "output": "fonts/hacknerdmono-italic.ttf",
+      "package": "@fontsource/jetbrains-mono",
+      "source": "files/jetbrains-mono-latin-400-italic.woff2"
+    },
+    {
+      "output": "fonts/hacknerdmono-regular.ttf",
+      "package": "@fontsource/jetbrains-mono",
+      "source": "files/jetbrains-mono-latin-400-normal.woff2"
+    }
+  ],
+  "excludedSourceTrees": ["public/fontawesome/**", "public/logos/**"],
+  "productAssetAliases": [
+    {
+      "request": "/logos/wave-logo.png",
+      "replacement": "hyprlane/assets/product-mark.svg"
+    },
+    {
+      "request": "@/app/asset/logo.svg",
+      "replacement": "hyprlane/assets/product-mark.svg"
+    }
+  ]
+}

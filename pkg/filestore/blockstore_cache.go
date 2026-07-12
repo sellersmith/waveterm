@@ -38,6 +38,7 @@ type CacheEntry struct {
 	File        *WaveFile
 	DataEntries map[int]*DataCacheEntry
 	FlushErrors int
+	TermHistory *terminalHistoryCache
 }
 
 //lint:ignore U1000 used for testing
@@ -88,6 +89,7 @@ func (entry *CacheEntry) clear() {
 	entry.File = nil
 	entry.DataEntries = make(map[int]*DataCacheEntry)
 	entry.FlushErrors = 0
+	entry.TermHistory = nil
 }
 
 func (entry *CacheEntry) getOrCreateDataCacheEntry(partIdx int) *DataCacheEntry {
@@ -218,10 +220,7 @@ func (entry *CacheEntry) readAt(ctx context.Context, offset int64, size int64, r
 		size = file.Size - offset
 	}
 	if file.Opts.Circular {
-		realDataOffset := int64(0)
-		if file.Size > file.Opts.MaxSize {
-			realDataOffset = file.Size - file.Opts.MaxSize
-		}
+		realDataOffset := file.DataStartIdx()
 		if offset < realDataOffset {
 			truncateAmt := realDataOffset - offset
 			offset += truncateAmt
@@ -323,6 +322,7 @@ func makeCacheEntry(zoneId string, name string) *CacheEntry {
 		File:        nil,
 		DataEntries: make(map[int]*DataCacheEntry),
 		FlushErrors: 0,
+		TermHistory: nil,
 	}
 }
 

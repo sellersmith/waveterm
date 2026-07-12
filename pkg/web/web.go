@@ -20,6 +20,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat"
 	"github.com/wavetermdev/waveterm/pkg/authkey"
 	"github.com/wavetermdev/waveterm/pkg/filestore"
@@ -63,6 +64,41 @@ const WSStatePacketChSize = 20
 type WebFnOpts struct {
 	AllowCaching bool
 	JsonErrors   bool
+}
+
+func embeddedPolicyHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if !policy.AllowsOrigin(origin) {
+			http.Error(w, "request origin denied by host policy", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Access-Control-Allow-Origin", policy.Current().AllowedOrigin)
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set(
+			"Access-Control-Allow-Headers",
+			"Content-Type, X-Session-Id, X-AuthKey, Authorization, X-Requested-With, Accept, Range",
+		)
+		w.Header().Set(
+			"Access-Control-Expose-Headers",
+			"X-ZoneFileInfo, Content-Length, Content-Type",
+		)
+		w.Header().Set("Vary", "Origin")
+		if !policy.AllowsHTTPPath(r.URL.Path) {
+			http.Error(w, "request route denied by host policy", http.StatusForbidden)
+			return
+		}
+
+		if err := authkey.ValidateIncomingRequest(r); err != nil {
+			http.Error(w, "request auth denied by host policy", http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func copyHeaders(dst, src http.Header) {
@@ -167,6 +203,37 @@ func handleWaveFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 
+	}
+	if policy.IsEmbedded() && (name == wavebase.BlockFile_Term || strings.HasPrefix(name, "cache:term:")) {
+		file, dataStartIdx, data, err := filestore.WFS.ReadFileSnapshot(
+			r.Context(),
+			zoneId,
+			name,
+			offset,
+		)
+		if err == fs.ErrNotExist {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		if err != nil {
+			http.Error(w, fmt.Sprintf("error reading terminal file snapshot: %v", err), http.StatusInternalServerError)
+			return
+		}
+		jsonFileBArr, err := json.Marshal(file)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("error serializing file info: %v", err), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set(ContentTypeHeaderKey, ContentTypeBinary)
+		w.Header().Set(ContentLengthHeaderKey, fmt.Sprintf("%d", len(data)))
+		w.Header().Set(WaveZoneFileInfoHeaderKey, base64.StdEncoding.EncodeToString(jsonFileBArr))
+		w.Header().Set(LastModifiedHeaderKey, time.UnixMilli(file.ModTs).UTC().Format(http.TimeFormat))
+		if dataStartIdx >= file.Size {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		_, _ = w.Write(data)
+		return
 	}
 	file, err := filestore.WFS.Stat(r.Context(), zoneId, name)
 	if err == fs.ErrNotExist {
@@ -430,12 +497,33 @@ func MakeTCPListener(serviceName string) (net.Listener, error) {
 
 func MakeUnixListener() (net.Listener, error) {
 	serverAddr := wavebase.GetDomainSocketName()
+	if policy.IsEmbedded() {
+		runtimeDir := filepath.Dir(serverAddr)
+		if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+			return nil, fmt.Errorf("creating embedded socket directory: %w", err)
+		}
+		stat, err := os.Lstat(runtimeDir)
+		if err != nil || !stat.IsDir() || stat.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("embedded socket directory is unsafe")
+		}
+		if err := os.Chmod(runtimeDir, 0700); err != nil {
+			return nil, fmt.Errorf("securing embedded socket directory: %w", err)
+		}
+	}
 	os.Remove(serverAddr) // ignore error
 	rtn, err := net.Listen("unix", serverAddr)
 	if err != nil {
 		return nil, fmt.Errorf("error creating listener at %v: %v", serverAddr, err)
 	}
-	os.Chmod(serverAddr, 0700)
+	socketMode := os.FileMode(0700)
+	if policy.IsEmbedded() {
+		socketMode = 0600
+	}
+	if err := os.Chmod(serverAddr, socketMode); err != nil {
+		rtn.Close()
+		os.Remove(serverAddr)
+		return nil, fmt.Errorf("securing unix listener at %v: %v", serverAddr, err)
+	}
 	log.Printf("Server [unix-domain] listening on %s\n", serverAddr)
 	return rtn, nil
 }
@@ -469,7 +557,9 @@ func RunWebServer(listener net.Listener) {
 	gr.PathPrefix(schemaPrefix).Handler(http.StripPrefix(schemaPrefix, schema.GetSchemaHandler()))
 
 	handler := http.Handler(gr)
-	if wavebase.IsDevMode() {
+	if policy.IsEmbedded() {
+		handler = embeddedPolicyHandler(handler)
+	} else if wavebase.IsDevMode() {
 		originalHandler := handler
 		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")

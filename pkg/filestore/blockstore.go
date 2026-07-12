@@ -65,21 +65,30 @@ type WaveFile struct {
 }
 
 // for regular files this is just Size
-// for circular files this is min(Size, MaxSize)
+// for circular files this is the retained byte length. Embedded terminal
+// history may advance past the physical byte-ring start to enforce its line cap.
 func (f WaveFile) DataLength() int64 {
 	if f.Opts.Circular {
-		return minInt64(f.Size, f.Opts.MaxSize)
+		return f.Size - f.DataStartIdx()
 	}
 	return f.Size
 }
 
 // for regular files this is just 0
-// for circular files this is the index of the first byte of data we have
+// for circular files this is the logical index of the first retained byte
 func (f WaveFile) DataStartIdx() int64 {
-	if f.Opts.Circular && f.Size > f.Opts.MaxSize {
-		return f.Size - f.Opts.MaxSize
+	if !f.Opts.Circular {
+		return 0
 	}
-	return 0
+	physicalStart := int64(0)
+	if f.Size > f.Opts.MaxSize {
+		physicalStart = f.Size - f.Opts.MaxSize
+	}
+	logicalStart := terminalHistoryLogicalStart(&f)
+	if logicalStart > physicalStart {
+		return logicalStart
+	}
+	return physicalStart
 }
 
 // this works because lower levels are immutable
@@ -113,6 +122,7 @@ func (FileData) UseDBMap() {}
 
 // synchronous (does not interact with the cache)
 func (s *FileStore) MakeFile(ctx context.Context, zoneId string, name string, meta wshrpc.FileMeta, opts wshrpc.FileOpts) error {
+	meta, opts = configureEmbeddedTerminalHistory(name, meta, opts)
 	if opts.MaxSize < 0 {
 		return fmt.Errorf("max size must be non-negative")
 	}
@@ -134,6 +144,19 @@ func (s *FileStore) MakeFile(ctx context.Context, zoneId string, name string, me
 		return fmt.Errorf("ijson budget must be non-negative")
 	}
 	return withLock(s, zoneId, name, func(entry *CacheEntry) error {
+		if embeddedTerminalHistoryEnabled() && name == terminalHistoryFileName && opts.Circular {
+			file, err := entry.loadFileForRead(ctx)
+			if err == nil {
+				entry.File = file
+				if err := ensureEmbeddedTerminalHistory(ctx, entry); err != nil {
+					return err
+				}
+				return fs.ErrExist
+			}
+			if err != fs.ErrNotExist {
+				return err
+			}
+		}
 		if entry.File != nil {
 			return fs.ErrExist
 		}
@@ -231,8 +254,31 @@ func (s *FileStore) WriteFile(ctx context.Context, zoneId string, name string, d
 		if err != nil {
 			return err
 		}
+		resetTerminalHistoryStart(entry.File)
+		advanceTerminalHistoryGeneration(entry.File)
+		entry.TermHistory = nil
 		entry.writeAt(0, data, true)
+		if err := updateTerminalHistoryStart(ctx, entry); err != nil {
+			return err
+		}
 		// since WriteFile can *truncate* the file, we need to flush the file to the DB immediately
+		return entry.flushToDB(ctx, true)
+	})
+}
+
+func (s *FileStore) WriteFileAndMeta(
+	ctx context.Context,
+	zoneId string,
+	name string,
+	data []byte,
+	meta wshrpc.FileMeta,
+) error {
+	return withLock(s, zoneId, name, func(entry *CacheEntry) error {
+		if err := entry.loadFileIntoCache(ctx); err != nil {
+			return err
+		}
+		entry.writeAt(0, data, true)
+		entry.File.Meta = copyMeta(meta)
 		return entry.flushToDB(ctx, true)
 	})
 }
@@ -262,11 +308,38 @@ func (s *FileStore) WriteAt(ctx context.Context, zoneId string, name string, off
 }
 
 func (s *FileStore) AppendData(ctx context.Context, zoneId string, name string, data []byte) error {
-	return withLock(s, zoneId, name, func(entry *CacheEntry) error {
+	_, _, err := s.AppendDataWithRange(ctx, zoneId, name, data)
+	return err
+}
+
+// AppendDataWithRange appends data and returns its monotonic logical byte
+// range. Circular retention never rewrites these offsets, so the existing WPS
+// file stream can use them to reconcile a reload snapshot with live appends.
+func (s *FileStore) AppendDataWithRange(
+	ctx context.Context,
+	zoneId string,
+	name string,
+	data []byte,
+) (startOffset int64, endOffset int64, rtnErr error) {
+	startOffset, endOffset, _, rtnErr = s.AppendDataWithRangeAndGeneration(ctx, zoneId, name, data)
+	return startOffset, endOffset, rtnErr
+}
+
+func (s *FileStore) AppendDataWithRangeAndGeneration(
+	ctx context.Context,
+	zoneId string,
+	name string,
+	data []byte,
+) (startOffset int64, endOffset int64, generation int64, rtnErr error) {
+	rtnErr = withLock(s, zoneId, name, func(entry *CacheEntry) error {
 		err := entry.loadFileIntoCache(ctx)
 		if err != nil {
 			return err
 		}
+		if err := initializeTerminalHistoryCache(ctx, entry); err != nil {
+			return err
+		}
+		startOffset = entry.File.Size
 		partMap := entry.File.computePartMap(entry.File.Size, int64(len(data)))
 		incompleteParts := incompletePartsFromMap(partMap)
 		if len(incompleteParts) > 0 {
@@ -276,8 +349,12 @@ func (s *FileStore) AppendData(ctx context.Context, zoneId string, name string, 
 			}
 		}
 		entry.writeAt(entry.File.Size, data, false)
+		endOffset = entry.File.Size
+		updateTerminalHistoryAfterAppend(entry, data, startOffset)
+		generation, _ = TerminalHistoryGeneration(entry.File)
 		return nil
 	})
+	return startOffset, endOffset, generation, rtnErr
 }
 
 func metaIncrement(file *WaveFile, key string, amount int) int {
@@ -385,6 +462,39 @@ func (s *FileStore) ReadFile(ctx context.Context, zoneId string, name string) (r
 		return nil
 	})
 	return
+}
+
+// ReadFileSnapshot returns immutable file metadata and bytes from the same
+// per-file lock acquisition. This prevents a circular terminal write from
+// wrapping between Stat and ReadAt during renderer reload.
+func (s *FileStore) ReadFileSnapshot(
+	ctx context.Context,
+	zoneId string,
+	name string,
+	offset int64,
+) (rtnFile *WaveFile, rtnOffset int64, rtnData []byte, rtnErr error) {
+	if offset < 0 {
+		return nil, 0, nil, fmt.Errorf("offset cannot be negative")
+	}
+	rtnErr = withLock(s, zoneId, name, func(entry *CacheEntry) error {
+		file, err := entry.loadFileForRead(ctx)
+		if err != nil {
+			return err
+		}
+		if offset < file.DataStartIdx() {
+			offset = file.DataStartIdx()
+		}
+		if offset > file.Size {
+			offset = file.Size
+		}
+		rtnOffset, rtnData, err = entry.readAt(ctx, offset, file.Size-offset, false)
+		if err != nil {
+			return err
+		}
+		rtnFile = file.DeepCopy()
+		return nil
+	})
+	return rtnFile, rtnOffset, rtnData, rtnErr
 }
 
 type FlushStats struct {

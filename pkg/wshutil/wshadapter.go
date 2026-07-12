@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/panichandler"
 	"github.com/wavetermdev/waveterm/pkg/util/utilfn"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc"
@@ -15,6 +16,10 @@ import (
 
 var WshCommandDeclMap = wshrpc.GenerateWshCommandDeclMap()
 var multiArgRType = reflect.TypeOf(wshrpc.MultiArg{})
+
+type hostPolicyScopedServer interface {
+	WshHostPolicyScoped()
+}
 
 func findCmdMethod(impl any, cmd string) *reflect.Method {
 	rtype := reflect.TypeOf(impl)
@@ -81,8 +86,13 @@ func serverImplAdapter(impl any) func(*RpcResponseHandler) bool {
 		panic(fmt.Sprintf("expected struct pointer, got %s", rtype))
 	}
 	// returns isAsync
+	_, enforceHostPolicy := impl.(hostPolicyScopedServer)
 	return func(handler *RpcResponseHandler) bool {
 		cmd := handler.GetCommand()
+		if enforceHostPolicy && !policy.AllowsWSHCommand(cmd) {
+			handler.SendResponseError(fmt.Errorf("command %q denied by host policy", cmd))
+			return true
+		}
 		methodDecl := WshCommandDeclMap[cmd]
 		if methodDecl == nil {
 			handler.SendResponseError(fmt.Errorf("command %q not found", cmd))

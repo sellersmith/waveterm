@@ -1,0 +1,6 @@
+repository=https://github.com/wavetermdev/waveterm.git
+tag=v0.14.5
+commit=97e560027f494d20fed347b2d6b72b6bcb3e50e0
+package_lock_sha256=aa1f6f9362afadd26a92d79aa6ddc50a03852083c2c08adb19286bb420798445
+go_mod_sha256=bd8a310fa177a32408e98b52bcfb265d2ff9a8d55f1e57a967d55696834610c7
+go_sum_sha256=a329a76d9f7f9069f0fe5c29ba114a7a9eae68d3cf8404ad288f0dfb34ac4a9f

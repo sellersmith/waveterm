@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/telemetry"
 	"github.com/wavetermdev/waveterm/pkg/telemetry/telemetrydata"
 	"github.com/wavetermdev/waveterm/pkg/util/daystr"
@@ -114,6 +115,9 @@ func makeAnonPostReq(ctx context.Context, apiUrl string, data interface{}) (*htt
 
 func doRequest(req *http.Request, outputObj interface{}, verbose bool) (*http.Response, error) {
 	apiUrl := req.Header.Get("X-PromptAPIUrl")
+	if !policy.AllowsOutbound("wave-cloud", req.URL.String()) {
+		return nil, fmt.Errorf("outbound wave-cloud request denied by host policy")
+	}
 	if verbose {
 		log.Printf("[wcloud] sending request %s %v\n", req.Method, req.URL)
 	}

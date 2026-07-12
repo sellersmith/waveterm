@@ -37,6 +37,19 @@ import {
     type ShellIntegrationStatus,
 } from "./osc-handlers";
 import {
+    drainTerminalAppendQueue,
+    HiddenTerminalReplayCoalescer,
+    isHyprlaneWaveEmbedded,
+    readEmbeddedSurfaceActivity,
+    reconcileTerminalAppend,
+    serializeBoundedTerminalState,
+    subscribeEmbeddedSurfaceActivity,
+    terminalGenerationChanged,
+    TerminalReplayChunkBytes,
+    TerminalReplayChunksPerFrame,
+    type TerminalAppend,
+} from "./terminal-replay";
+import {
     bufferLinesToText,
     createTempFileFromBlob,
     extractAllClipboardData,
@@ -78,6 +91,7 @@ export class TermWrap {
     tabId: string;
     blockId: string;
     ptyOffset: number;
+    ptyGeneration: number | null;
     dataBytesProcessed: number;
     terminal: Terminal;
     connectElem: HTMLDivElement;
@@ -86,7 +100,7 @@ export class TermWrap {
     serializeAddon: SerializeAddon;
     mainFileSubject: SubjectWithRef<WSFileEventData>;
     loaded: boolean;
-    heldData: Uint8Array[];
+    heldData: TerminalAppend[];
     handleResize_debounced: () => void;
     hasResized: boolean;
     multiInputCallback: (data: string) => void;
@@ -105,6 +119,15 @@ export class TermWrap {
     nodeModel: BlockNodeModel; // this can be null
     hoveredLinkUri: string | null = null;
     onLinkHover?: (uri: string | null, mouseX: number, mouseY: number) => void;
+    disposed: boolean = false;
+    replayActivationCancel: (() => void) | null = null;
+    terminalWriteQueue: Promise<void> = Promise.resolve();
+    mainFileSubscription: { unsubscribe: () => void } | null = null;
+    idleTimeoutId: number | null = null;
+    replayResetVersion: number = 0;
+    pendingWriteResolvers: Set<() => void> = new Set();
+    hiddenReplayChanges = new HiddenTerminalReplayCoalescer();
+    hiddenReplayDrainScheduled: boolean = false;
 
     // Paste deduplication
     // xterm.js paste() method triggers onData event, which can cause duplicate sends
@@ -135,6 +158,7 @@ export class TermWrap {
         this.sendDataHandler = waveOptions.sendDataHandler;
         this.nodeModel = waveOptions.nodeModel;
         this.ptyOffset = 0;
+        this.ptyGeneration = null;
         this.dataBytesProcessed = 0;
         this.hasResized = false;
         this.lastUpdated = Date.now();
@@ -409,9 +433,6 @@ export class TermWrap {
             this.toDispose.push(this.searchAddon.onDidChangeResults(this.onSearchResultsDidChange.bind(this)));
         }
 
-        this.mainFileSubject = getFileSubject(this.getZoneId(), TermFileName);
-        this.mainFileSubject.subscribe(this.handleNewFileSubjectData.bind(this));
-
         try {
             const rtInfo = await RpcApi.GetRTInfoCommand(TabRpcClient, {
                 oref: WOS.makeORef("block", this.blockId),
@@ -433,15 +454,49 @@ export class TermWrap {
             console.log("Error loading runtime info:", e);
         }
 
-        try {
-            await this.loadInitialTerminalData();
-        } finally {
-            this.loaded = true;
+        await this.waitUntilActiveForReplay();
+        if (this.disposed) {
+            return;
         }
+        this.mainFileSubject = getFileSubject(this.getZoneId(), TermFileName);
+        this.mainFileSubscription = this.mainFileSubject.subscribe(this.handleNewFileSubjectData.bind(this));
+
+        try {
+            while (!this.disposed) {
+                const resetVersion = this.replayResetVersion;
+                await this.loadInitialTerminalData();
+                if (resetVersion === this.replayResetVersion) break;
+                this.terminal.reset();
+                this.ptyOffset = 0;
+            }
+            if (isHyprlaneWaveEmbedded()) {
+                await drainTerminalAppendQueue(this.heldData, (append) => this.applyTerminalAppend(append));
+            } else {
+                // Standalone Wave append events do not carry snapshot offsets.
+                // Preserve upstream behavior rather than risking duplicate replay.
+                this.heldData = [];
+            }
+        } catch (e) {
+            console.error("Error loading initial terminal data:", e);
+        } finally {
+            this.loaded = !this.disposed;
+        }
+        if (this.disposed) return;
         this.runProcessIdleTimeout();
     }
 
     dispose() {
+        this.disposed = true;
+        this.replayActivationCancel?.();
+        this.replayActivationCancel = null;
+        if (this.idleTimeoutId != null) {
+            window.clearTimeout(this.idleTimeoutId);
+            this.idleTimeoutId = null;
+        }
+        this.mainFileSubscription?.unsubscribe();
+        this.mainFileSubscription = null;
+        for (const resolve of this.pendingWriteResolvers) resolve();
+        this.pendingWriteResolvers.clear();
         this.promptMarkers.forEach((marker) => {
             try {
                 marker.dispose();
@@ -460,7 +515,7 @@ export class TermWrap {
                 /* nothing */
             }
         });
-        this.mainFileSubject.release();
+        this.mainFileSubject?.release();
     }
 
     handleTermData(data: string) {
@@ -477,15 +532,30 @@ export class TermWrap {
     }
 
     handleNewFileSubjectData(msg: WSFileEventData) {
+        if (isHyprlaneWaveEmbedded() && this.loaded && (this.hiddenReplayDrainScheduled || !this.isActiveForReplay())) {
+            if (msg.fileop == "append" || msg.fileop == "truncate") {
+                this.hiddenReplayChanges.mark(msg.fileop, msg.generation);
+                this.scheduleHiddenTerminalDrain();
+                return;
+            }
+        }
         if (msg.fileop == "truncate") {
-            this.terminal.clear();
-            this.heldData = [];
-        } else if (msg.fileop == "append") {
-            const decodedData = base64ToArray(msg.data64);
             if (this.loaded) {
-                this.doTerminalWrite(decodedData, null);
+                void this.enqueueTerminalWrite(async () => this.applyTerminalTruncate(msg.generation));
             } else {
-                this.heldData.push(decodedData);
+                this.applyTerminalTruncate(msg.generation);
+            }
+        } else if (msg.fileop == "append") {
+            const append: TerminalAppend = {
+                data: base64ToArray(msg.data64),
+                startOffset: msg.startoffset,
+                endOffset: msg.endoffset,
+                generation: msg.generation,
+            };
+            if (this.loaded) {
+                void this.enqueueTerminalWrite(() => this.applyTerminalAppend(append));
+            } else {
+                this.heldData.push(append);
             }
         } else {
             console.log("bad fileop for terminal", msg);
@@ -493,7 +563,48 @@ export class TermWrap {
         }
     }
 
-    doTerminalWrite(data: string | Uint8Array, setPtyOffset?: number): Promise<void> {
+    scheduleHiddenTerminalDrain() {
+        if (this.hiddenReplayDrainScheduled || this.disposed) return;
+        this.hiddenReplayDrainScheduled = true;
+        void this.enqueueTerminalWrite(() => this.drainHiddenTerminalChanges());
+    }
+
+    async drainHiddenTerminalChanges(): Promise<void> {
+        try {
+            while (!this.disposed) {
+                await this.waitUntilActiveForReplay();
+                if (this.disposed) return;
+                const change = this.hiddenReplayChanges.take();
+                if (change == null) return;
+                if (change.truncated || terminalGenerationChanged(this.ptyGeneration, change.generation ?? undefined)) {
+                    this.applyTerminalTruncate(change.generation ?? undefined);
+                }
+                await this.loadRawTerminalTail(this.ptyOffset);
+                // Appends received during the fetch/write set dirty again while
+                // this single scheduled drain remains in flight. Loop once more
+                // against the authoritative bounded tail instead of retaining
+                // any raw event chunks.
+            }
+        } finally {
+            this.hiddenReplayDrainScheduled = false;
+            if (this.hiddenReplayChanges.dirty && !this.disposed) {
+                this.scheduleHiddenTerminalDrain();
+            }
+        }
+    }
+
+    applyTerminalTruncate(generation?: number) {
+        if (this.disposed) return;
+        this.replayResetVersion++;
+        this.terminal.reset();
+        this.heldData = [];
+        this.ptyOffset = 0;
+        this.ptyGeneration = generation ?? null;
+        this.dataBytesProcessed = 0;
+    }
+
+    doTerminalWrite(data: string | Uint8Array, setPtyOffset?: number, trackProcessed: boolean = true): Promise<void> {
+        if (this.disposed) return Promise.resolve();
         if (isDev() && this.loaded) {
             const dataStr = data instanceof Uint8Array ? new TextDecoder().decode(data) : data;
             this.recentWrites.push({ idx: this.recentWritesCounter++, ts: Date.now(), data: dataStr });
@@ -503,13 +614,26 @@ export class TermWrap {
         }
         let resolve: () => void = null;
         const prtn = new Promise<void>((presolve, _) => {
-            resolve = presolve;
+            let resolved = false;
+            resolve = () => {
+                if (resolved) return;
+                resolved = true;
+                this.pendingWriteResolvers.delete(resolve);
+                presolve();
+            };
+            this.pendingWriteResolvers.add(resolve);
         });
         this.terminal.write(data, () => {
+            if (this.disposed) {
+                resolve();
+                return;
+            }
             if (setPtyOffset != null) {
                 this.ptyOffset = setPtyOffset;
             } else {
                 this.ptyOffset += data.length;
+            }
+            if (trackProcessed) {
                 this.dataBytesProcessed += data.length;
             }
             this.lastUpdated = Date.now();
@@ -518,37 +642,201 @@ export class TermWrap {
         return prtn;
     }
 
+    enqueueTerminalWrite(operation: () => Promise<void>): Promise<void> {
+        this.terminalWriteQueue = this.terminalWriteQueue.then(operation, operation).catch((error) => {
+            console.error("terminal write failed", this.blockId, error);
+        });
+        return this.terminalWriteQueue;
+    }
+
+    isActiveForReplay(): boolean {
+        return this.nodeModel != null && globalStore.get(this.nodeModel.isFocused) && readEmbeddedSurfaceActivity();
+    }
+
+    async waitUntilActiveForReplay(): Promise<void> {
+        if (!isHyprlaneWaveEmbedded() || this.nodeModel == null || this.isActiveForReplay()) {
+            return;
+        }
+        await new Promise<void>((resolve) => {
+            let settled = false;
+            let unsubscribe = () => {};
+            let unsubscribeSurfaceActivity = () => {};
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                unsubscribe();
+                unsubscribeSurfaceActivity();
+                this.replayActivationCancel = null;
+                resolve();
+            };
+            const checkActive = () => {
+                if (this.isActiveForReplay()) {
+                    finish();
+                }
+            };
+            unsubscribe = globalStore.sub(this.nodeModel.isFocused, checkActive);
+            unsubscribeSurfaceActivity = subscribeEmbeddedSurfaceActivity(checkActive);
+            this.replayActivationCancel = finish;
+            if (this.isActiveForReplay() || this.disposed) {
+                finish();
+            }
+        });
+    }
+
+    async waitForReplayFrame(): Promise<void> {
+        await new Promise<void>((resolve) => {
+            let settled = false;
+            const finish = () => {
+                if (settled) return;
+                settled = true;
+                resolve();
+            };
+            if (typeof window.requestAnimationFrame === "function") {
+                window.requestAnimationFrame(finish);
+            }
+            window.setTimeout(finish, 50);
+        });
+    }
+
+    async writeReplayData(
+        data: Uint8Array,
+        logicalStart: number,
+        logicalEnd: number,
+        countsTowardPtyOffset: boolean
+    ): Promise<void> {
+        if (this.disposed) {
+            return;
+        }
+        if (data.byteLength === 0) {
+            this.ptyOffset = logicalEnd;
+            return;
+        }
+        let consumed = 0;
+        let chunksThisFrame = 0;
+        while (consumed < data.byteLength) {
+            await this.waitUntilActiveForReplay();
+            if (this.disposed) {
+                return;
+            }
+            const chunkEnd = Math.min(consumed + TerminalReplayChunkBytes, data.byteLength);
+            const chunk = data.subarray(consumed, chunkEnd);
+            const nextOffset = countsTowardPtyOffset ? logicalStart + chunkEnd : logicalEnd;
+            await this.doTerminalWrite(chunk, nextOffset, false);
+            consumed = chunkEnd;
+            chunksThisFrame++;
+            if (chunksThisFrame === TerminalReplayChunksPerFrame && consumed < data.byteLength) {
+                chunksThisFrame = 0;
+                await this.waitForReplayFrame();
+            }
+        }
+        this.ptyOffset = logicalEnd;
+    }
+
+    async loadRawTerminalTail(offset: number, allowGenerationRefetch: boolean = true): Promise<void> {
+        const { data, fileInfo } = await fetchWaveFile(this.getZoneId(), TermFileName, offset);
+        if (fileInfo == null || this.disposed) {
+            return;
+        }
+        const replayData = data ?? new Uint8Array();
+        const logicalEnd = fileInfo.size;
+        const logicalStart = logicalEnd - replayData.byteLength;
+        const incomingGeneration = fileInfo.meta?.["hyprlane:history-generation"];
+        if (terminalGenerationChanged(this.ptyGeneration, incomingGeneration)) {
+            this.applyTerminalTruncate(incomingGeneration);
+            if (offset !== 0 && allowGenerationRefetch) {
+                await this.loadRawTerminalTail(0, false);
+                return;
+            }
+        }
+        if (incomingGeneration != null) this.ptyGeneration = incomingGeneration;
+        if (logicalEnd <= this.ptyOffset) return;
+        if (logicalStart > this.ptyOffset) {
+            // The ring advanced beyond the renderer's last offset. Reset xterm
+            // and replay the bounded authoritative tail from its logical start.
+            this.terminal.reset();
+            this.ptyOffset = logicalStart;
+        }
+        const unseenStart = Math.max(this.ptyOffset, logicalStart);
+        const unseenData = replayData.subarray(unseenStart - logicalStart);
+        await this.writeReplayData(unseenData, unseenStart, logicalEnd, true);
+    }
+
+    async applyTerminalAppend(append: TerminalAppend): Promise<void> {
+        if (this.disposed) return;
+        if (terminalGenerationChanged(this.ptyGeneration, append.generation)) {
+            this.applyTerminalTruncate(append.generation);
+            await this.loadRawTerminalTail(0);
+            return;
+        }
+        if (append.generation != null && this.ptyGeneration == null) {
+            this.ptyGeneration = append.generation;
+        }
+        let decision = reconcileTerminalAppend(this.ptyOffset, append);
+        if (decision.kind === "resync") {
+            await this.loadRawTerminalTail(this.ptyOffset);
+            decision = reconcileTerminalAppend(this.ptyOffset, append);
+        }
+        if (decision.kind === "discard") {
+            return;
+        }
+        if (decision.kind === "resync") {
+            console.warn("terminal append could not be reconciled after resync", this.blockId);
+            return;
+        }
+        await this.doTerminalWrite(decision.data, decision.endOffset);
+    }
+
     async loadInitialTerminalData(): Promise<void> {
         const startTs = Date.now();
         const zoneId = this.getZoneId();
         const { data: cacheData, fileInfo: cacheFile } = await fetchWaveFile(zoneId, TermCacheFileName);
+        if (this.disposed) return;
         let ptyOffset = 0;
         if (cacheFile != null) {
             ptyOffset = cacheFile.meta["ptyoffset"] ?? 0;
-            if (cacheData.byteLength > 0) {
-                const curTermSize: TermSize = { rows: this.terminal.rows, cols: this.terminal.cols };
-                const fileTermSize: TermSize = cacheFile.meta["termsize"];
-                let didResize = false;
-                if (
-                    fileTermSize != null &&
-                    (fileTermSize.rows != curTermSize.rows || fileTermSize.cols != curTermSize.cols)
-                ) {
-                    console.log("terminal restore size mismatch, temp resize", fileTermSize, curTermSize);
-                    this.terminal.resize(fileTermSize.cols, fileTermSize.rows);
-                    didResize = true;
-                }
-                this.doTerminalWrite(cacheData, ptyOffset);
-                if (didResize) {
-                    this.terminal.resize(curTermSize.cols, curTermSize.rows);
-                }
+        }
+        let { data: mainData, fileInfo: mainFile } = await fetchWaveFile(zoneId, TermFileName, ptyOffset);
+        if (this.disposed) return;
+        const embedded = isHyprlaneWaveEmbedded();
+        const cacheGeneration = cacheFile?.meta?.["generation"];
+        let mainGeneration = mainFile?.meta?.["hyprlane:history-generation"];
+        const cacheValid =
+            cacheFile == null ||
+            !embedded ||
+            (Number.isSafeInteger(cacheGeneration) && cacheGeneration === mainGeneration);
+        if (!cacheValid) {
+            this.terminal.reset();
+            ptyOffset = 0;
+            ({ data: mainData, fileInfo: mainFile } = await fetchWaveFile(zoneId, TermFileName, 0));
+            if (this.disposed) return;
+            mainGeneration = mainFile?.meta?.["hyprlane:history-generation"];
+        } else if (cacheFile != null && cacheData.byteLength > 0) {
+            const curTermSize: TermSize = { rows: this.terminal.rows, cols: this.terminal.cols };
+            const fileTermSize: TermSize = cacheFile.meta["termsize"];
+            let didResize = false;
+            if (
+                fileTermSize != null &&
+                (fileTermSize.rows != curTermSize.rows || fileTermSize.cols != curTermSize.cols)
+            ) {
+                console.log("terminal restore size mismatch, temp resize", fileTermSize, curTermSize);
+                this.terminal.resize(fileTermSize.cols, fileTermSize.rows);
+                didResize = true;
+            }
+            await this.writeReplayData(cacheData, ptyOffset, ptyOffset, false);
+            if (didResize) {
+                this.terminal.resize(curTermSize.cols, curTermSize.rows);
             }
         }
-        const { data: mainData, fileInfo: mainFile } = await fetchWaveFile(zoneId, TermFileName, ptyOffset);
+        if (this.disposed) return;
+        this.ptyGeneration = mainGeneration ?? null;
         console.log(
             `terminal loaded cachefile:${cacheData?.byteLength ?? 0} main:${mainData?.byteLength ?? 0} bytes, ${Date.now() - startTs}ms`
         );
         if (mainFile != null) {
-            await this.doTerminalWrite(mainData, null);
+            const replayData = mainData ?? new Uint8Array();
+            const logicalEnd = mainFile.size;
+            const logicalStart = logicalEnd - replayData.byteLength;
+            await this.writeReplayData(replayData, logicalStart, logicalEnd, true);
         }
     }
 
@@ -570,6 +858,16 @@ export class TermWrap {
         const oldRows = this.terminal.rows;
         const oldCols = this.terminal.cols;
         this.fitAddon.fit();
+        if (!this.hasResized) {
+            this.hasResized = true;
+            // ControllerResync carries the initial terminal size and creates
+            // the shell when a new Wave tab first becomes visible. Sending a
+            // separate input-size RPC before that work completes races the
+            // controller registry and produces a spurious "no controller"
+            // error on every fresh tab.
+            this.resyncController("initial resize");
+            return;
+        }
         if (oldRows !== this.terminal.rows || oldCols !== this.terminal.cols) {
             const termSize: TermSize = { rows: this.terminal.rows, cols: this.terminal.cols };
             console.log(
@@ -581,28 +879,39 @@ export class TermWrap {
             RpcApi.ControllerInputCommand(TabRpcClient, { blockid: this.blockId, termsize: termSize });
         }
         dlog("resize", `${this.terminal.rows}x${this.terminal.cols}`, `${oldRows}x${oldCols}`, this.hasResized);
-        if (!this.hasResized) {
-            this.hasResized = true;
-            this.resyncController("initial resize");
-        }
     }
 
     processAndCacheData() {
         if (this.dataBytesProcessed < MinDataProcessedForCache) {
             return;
         }
-        const serializedOutput = this.serializeAddon.serialize();
+        const embedded = isHyprlaneWaveEmbedded();
+        const serializedOutput = embedded
+            ? serializeBoundedTerminalState((options) => this.serializeAddon.serialize(options))
+            : this.serializeAddon.serialize();
+        const cachePtyOffset = embedded && serializedOutput.length === 0 ? 0 : this.ptyOffset;
         const termSize: TermSize = { rows: this.terminal.rows, cols: this.terminal.cols };
         console.log("idle timeout term", this.dataBytesProcessed, serializedOutput.length, termSize);
         fireAndForget(() =>
-            services.BlockService.SaveTerminalState(this.blockId, serializedOutput, "full", this.ptyOffset, termSize)
+            services.BlockService.SaveTerminalState(
+                this.blockId,
+                serializedOutput,
+                "full",
+                cachePtyOffset,
+                termSize,
+                this.ptyGeneration ?? 0
+            )
         );
         this.dataBytesProcessed = 0;
     }
 
     runProcessIdleTimeout() {
-        setTimeout(() => {
+        if (this.disposed) return;
+        this.idleTimeoutId = window.setTimeout(() => {
+            this.idleTimeoutId = null;
+            if (this.disposed) return;
             window.requestIdleCallback(() => {
+                if (this.disposed) return;
                 this.processAndCacheData();
                 this.runProcessIdleTimeout();
             });

@@ -1,0 +1,40 @@
+/* Copyright 2026, Hyprlane */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+.fa-fw {
+  display: inline-block;
+  width: 1.25em;
+  text-align: center;
+}
+
+.fa-spin {
+  animation: hyprlane-icon-spin 1s linear infinite;
+}
+
+.fa-stack {
+  display: inline-grid;
+  width: 2em;
+  height: 2em;
+  place-items: center;
+  vertical-align: middle;
+}
+
+.fa-stack > * {
+  grid-area: 1 / 1;
+}
+
+.fa-stack-1x {
+  line-height: 1;
+}
+
+@keyframes hyprlane-icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fa-spin {
+    animation: none;
+  }
+}

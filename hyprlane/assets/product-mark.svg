@@ -1,0 +1,27 @@
+<!-- Copyright 2026, Hyprlane -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="48"
+  height="34"
+  viewBox="0 0 48 34"
+  fill="none"
+>
+  <rect x="1" y="1" width="46" height="32" rx="7" fill="#171717" />
+  <rect
+    x="1"
+    y="1"
+    width="46"
+    height="32"
+    rx="7"
+    stroke="#737373"
+    stroke-width="2"
+  />
+  <path
+    d="m12 11 6 6-6 6M23 23h12"
+    stroke="#a3e635"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

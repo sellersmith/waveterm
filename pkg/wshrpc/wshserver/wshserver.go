@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/skratchdot/open-golang/open"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/chatstore"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/uctypes"
@@ -65,6 +66,8 @@ var InvalidWslDistroNames = []string{"docker-desktop", "docker-desktop-data"}
 type WshServer struct{}
 
 func (*WshServer) WshServerImpl() {}
+
+func (*WshServer) WshHostPolicyScoped() {}
 
 var WshServerImpl = WshServer{}
 
@@ -595,7 +598,17 @@ func termCtxWithLogBlockId(ctx context.Context, logBlockId string) context.Conte
 	return blocklogger.ContextWithLogBlockId(ctx, logBlockId, connDebug == "debug")
 }
 
+func validateConnectionEnsurePolicy(embedded bool, connName string) error {
+	if embedded && !conncontroller.IsLocalConnName(connName) {
+		return fmt.Errorf("connection %q denied by host policy", connName)
+	}
+	return nil
+}
+
 func (ws *WshServer) ConnEnsureCommand(ctx context.Context, data wshrpc.ConnExtData) error {
+	if err := validateConnectionEnsurePolicy(policy.IsEmbedded(), data.ConnName); err != nil {
+		return err
+	}
 	ctx = genconn.ContextWithConnData(ctx, data.LogBlockId)
 	ctx = termCtxWithLogBlockId(ctx, data.LogBlockId)
 	if strings.HasPrefix(data.ConnName, "wsl://") {

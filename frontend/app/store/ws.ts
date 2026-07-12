@@ -187,6 +187,10 @@ class WSControl {
             // nothing
             return;
         }
+        if (eventData.type == "error") {
+            dlog("server error:", eventData.error);
+            return;
+        }
         if (this.messageCallback) {
             try {
                 this.messageCallback(eventData);

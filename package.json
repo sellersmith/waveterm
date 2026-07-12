@@ -23,12 +23,18 @@
         "start": "electron-vite preview",
         "build:dev": "electron-vite build --mode development",
         "build:prod": "electron-vite build --mode production",
+        "build:hyprlane:broad-core": "node hyprlane/build/build-broad-artifact.mjs",
+        "verify:hyprlane:broad-core": "node hyprlane/build/verify-surface-artifact.mjs dist/hyprlane",
+        "test:hyprlane:artifact": "node --test hyprlane/build/provenance.node-test.mjs hyprlane/build/full-renderer-artifact.node-test.mjs hyprlane/build/verify-surface-artifact.node-test.mjs",
         "coverage": "vitest run --coverage",
         "test": "vitest",
         "postinstall": "node ./postinstall.cjs"
     },
     "devDependencies": {
         "@eslint/js": "^9.39",
+        "@fontsource-variable/inter": "5.2.8",
+        "@fontsource/jetbrains-mono": "5.2.8",
+        "@phosphor-icons/web": "2.1.2",
         "@rollup/plugin-node-resolve": "^16.0.3",
         "@tailwindcss/vite": "^4.2.1",
         "@types/css-tree": "^2",

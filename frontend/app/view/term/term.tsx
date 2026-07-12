@@ -22,6 +22,7 @@ import debug from "debug";
 import * as jotai from "jotai";
 import * as React from "react";
 import { TermLinkTooltip } from "./term-tooltip";
+import { boundEmbeddedScrollback, isHyprlaneWaveEmbedded } from "./terminal-replay";
 import { TermStickers } from "./termsticker";
 import { TermThemeUpdater } from "./termtheme";
 import { computeTheme, normalizeCursorStyle } from "./termutil";
@@ -288,6 +289,7 @@ const TerminalView = ({ blockId, model }: ViewComponentProps<TermViewModel>) => 
         if (termScrollback > 50000) {
             termScrollback = 50000;
         }
+        termScrollback = boundEmbeddedScrollback(termScrollback, isHyprlaneWaveEmbedded());
         const termAllowBPM = globalStore.get(model.termBPMAtom) ?? true;
         const termMacOptionIsMeta = globalStore.get(termMacOptionIsMetaAtom) ?? false;
         const termCursorStyle = normalizeCursorStyle(globalStore.get(getOverrideConfigAtom(blockId, "term:cursor")));

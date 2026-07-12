@@ -4,8 +4,10 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/aiusechat"
 	"github.com/wavetermdev/waveterm/pkg/authkey"
 	"github.com/wavetermdev/waveterm/pkg/blockcontroller"
@@ -64,6 +67,8 @@ const BackupCleanupTick = 2 * time.Minute
 const BackupCleanupInterval = 4 * time.Hour
 const InitialDiagnosticWait = 5 * time.Minute
 const DiagnosticTick = 10 * time.Minute
+const parentHeartbeatPrefix = "hyprlane-parent-heartbeat:"
+const parentHeartbeatLease = 10 * time.Second
 
 var shutdownOnce sync.Once
 
@@ -80,9 +85,13 @@ func doShutdown(reason string) {
 		log.Printf("shutting down: %s\n", reason)
 		ctx, cancelFn := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancelFn()
-		go blockcontroller.StopAllBlockControllersForShutdown()
-		shutdownActivityUpdate()
-		sendTelemetryWrapper()
+		if err := blockcontroller.StopAllBlockControllersForShutdownAndWait(ctx); err != nil {
+			log.Printf("error stopping block controllers: %v\n", err)
+		}
+		if telemetryBackgroundEnabled() {
+			shutdownActivityUpdate()
+			sendTelemetryWrapper()
+		}
 		// TODO deal with flush in progress
 		clearTempFiles()
 		filestore.WFS.FlushCache(ctx)
@@ -90,17 +99,97 @@ func doShutdown(reason string) {
 		if watcher != nil {
 			watcher.Close()
 		}
-		time.Sleep(500 * time.Millisecond)
 		log.Printf("shutdown complete\n")
 		os.Exit(0)
 	})
 }
 
-// watch stdin, kill server if stdin is closed
+func telemetryBackgroundEnabled() bool {
+	return !policy.IsEmbedded()
+}
+
+func optionalBackgroundLoopEnabled(name string) bool {
+	return policy.AllowsBackgroundLoop(name)
+}
+
+type parentHeartbeatEvent struct {
+	frame string
+	err   error
+}
+
+func watchParentHeartbeats(reader io.Reader, expectedNonce string, lease time.Duration) error {
+	if lease <= 0 {
+		return fmt.Errorf("invalid parent heartbeat lease")
+	}
+	events := make(chan parentHeartbeatEvent)
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 128), 256)
+		for scanner.Scan() {
+			select {
+			case events <- parentHeartbeatEvent{frame: scanner.Text()}:
+			case <-done:
+				return
+			}
+		}
+		err := scanner.Err()
+		if err == nil {
+			err = io.EOF
+		}
+		select {
+		case events <- parentHeartbeatEvent{err: err}:
+		case <-done:
+		}
+	}()
+
+	timer := time.NewTimer(lease)
+	defer timer.Stop()
+	expectedFrame := parentHeartbeatPrefix + expectedNonce
+	for {
+		select {
+		case event := <-events:
+			if event.err != nil {
+				if event.err == io.EOF {
+					return fmt.Errorf("parent stdin closed")
+				}
+				return fmt.Errorf("reading parent heartbeat: %w", event.err)
+			}
+			if event.frame != expectedFrame {
+				return fmt.Errorf("invalid parent heartbeat")
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(lease)
+		case <-timer.C:
+			return fmt.Errorf("parent heartbeat lease expired")
+		}
+	}
+}
+
+// Watch the Electron-owned stdin pipe and tear down the server if the parent
+// closes it. Embedded mode additionally requires nonce-bound heartbeats so a
+// wedged parent cannot leave shells running indefinitely.
 func stdinReadWatch() {
 	defer func() {
 		panichandler.PanicHandler("stdinReadWatch", recover())
 	}()
+	if policy.IsEmbedded() {
+		if err := watchParentHeartbeats(
+			os.Stdin,
+			policy.Current().StartupNonce,
+			parentHeartbeatLease,
+		); err != nil {
+			doShutdown(err.Error())
+		}
+		return
+	}
 	buf := make([]byte, 1024)
 	for {
 		_, err := os.Stdin.Read(buf)
@@ -137,6 +226,10 @@ func diagnosticLoop() {
 	defer func() {
 		panichandler.PanicHandler("diagnosticLoop", recover())
 	}()
+	if !telemetryBackgroundEnabled() {
+		log.Printf("embedded host policy disables diagnostic ping\n")
+		return
+	}
 	if os.Getenv("WAVETERM_NOPING") != "" {
 		log.Printf("WAVETERM_NOPING set, disabling diagnostic ping\n")
 		return
@@ -215,6 +308,9 @@ func panicTelemetryHandler(panicName string) {
 }
 
 func sendTelemetryWrapper() {
+	if !telemetryBackgroundEnabled() {
+		return
+	}
 	defer func() {
 		panichandler.PanicHandler("sendTelemetryWrapper", recover())
 	}()
@@ -397,7 +493,11 @@ func createMainWshClient() {
 }
 
 func grabAndRemoveEnvVars() error {
-	err := authkey.SetAuthKeyFromEnv()
+	_, err := policy.InitializeFromEnvironment()
+	if err != nil {
+		return fmt.Errorf("initializing Hyprlane host policy: %v", err)
+	}
+	err = authkey.SetAuthKeyFromEnv()
 	if err != nil {
 		return fmt.Errorf("setting auth key: %v", err)
 	}
@@ -434,6 +534,10 @@ func clearTempFiles() error {
 }
 
 func maybeStartPprofServer() {
+	if policy.IsEmbedded() {
+		log.Printf("embedded host policy disables pprof server and memory profiling override\n")
+		return
+	}
 	settings := wconfig.GetWatcher().GetFullConfig().Settings
 	if settings.DebugPprofMemProfileRate != nil {
 		runtime.MemProfileRate = *settings.DebugPprofMemProfileRate
@@ -525,7 +629,9 @@ func main() {
 		log.Printf("error initializing wstore: %v\n", err)
 		return
 	}
-	panichandler.PanicTelemetryHandler = panicTelemetryHandler
+	if telemetryBackgroundEnabled() {
+		panichandler.PanicTelemetryHandler = panicTelemetryHandler
+	}
 	go func() {
 		defer func() {
 			panichandler.PanicHandler("InitCustomShellStartupFiles", recover())
@@ -563,17 +669,31 @@ func main() {
 	sigutil.InstallSIGUSR1Handler()
 	wconfig.MigratePresetsBackgrounds()
 	startConfigWatcher()
-	aiusechat.InitAIModeConfigWatcher()
+	if optionalBackgroundLoopEnabled("wave.ai.config") {
+		aiusechat.InitAIModeConfigWatcher()
+	} else {
+		log.Printf("embedded host policy disables Wave AI config watcher\n")
+	}
 	maybeStartPprofServer()
 	go stdinReadWatch()
-	go telemetryLoop()
-	go diagnosticLoop()
-	setupTelemetryConfigHandler()
-	go updateTelemetryCountsLoop()
+	if telemetryBackgroundEnabled() {
+		go telemetryLoop()
+		go diagnosticLoop()
+		setupTelemetryConfigHandler()
+		go updateTelemetryCountsLoop()
+	} else {
+		log.Printf("embedded host policy disables telemetry background work\n")
+	}
 	go backupCleanupLoop()
-	go startupActivityUpdate(firstLaunch) // must be after startConfigWatcher()
+	if telemetryBackgroundEnabled() {
+		go startupActivityUpdate(firstLaunch) // must be after startConfigWatcher()
+	}
 	blocklogger.InitBlockLogger()
-	jobcontroller.InitJobController()
+	if optionalBackgroundLoopEnabled("jobs") {
+		jobcontroller.InitJobController()
+	} else {
+		log.Printf("embedded host policy disables durable-job background workers\n")
+	}
 	blockcontroller.InitBlockController()
 	err = wcore.InitBadgeStore()
 	if err != nil {

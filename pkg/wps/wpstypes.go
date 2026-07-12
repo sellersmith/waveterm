@@ -85,8 +85,11 @@ const (
 )
 
 type WSFileEventData struct {
-	ZoneId   string `json:"zoneid"`
-	FileName string `json:"filename"`
-	FileOp   string `json:"fileop"`
-	Data64   string `json:"data64"`
+	ZoneId      string `json:"zoneid"`
+	FileName    string `json:"filename"`
+	FileOp      string `json:"fileop"`
+	Data64      string `json:"data64"`
+	StartOffset *int64 `json:"startoffset,omitempty"`
+	EndOffset   *int64 `json:"endoffset,omitempty"`
+	Generation  *int64 `json:"generation,omitempty"`
 }

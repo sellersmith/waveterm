@@ -1,0 +1,17 @@
+/* Copyright 2026, Hyprlane */
+/* SPDX-License-Identifier: Apache-2.0 */
+
+/*
+ * Wave v0.14.5 uses the Tailwind v3 `flex-grow` utility. Tailwind v4, which
+ * builds the hosted artifact, renamed it to `grow`; without these aliases,
+ * the workspace and tab content do not fill their parent and the terminal is
+ * compressed at the bottom of the window. Keep this compatibility boundary in
+ * Hyprlane-owned assets so upstream Wave source remains unchanged.
+ */
+.flex-grow {
+  flex-grow: 1;
+}
+
+.flex-grow-\[2\] {
+  flex-grow: 2;
+}

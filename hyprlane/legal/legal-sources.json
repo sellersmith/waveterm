@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "files": [
+    {
+      "source": "LICENSE",
+      "output": "LICENSE",
+      "package": "Wave",
+      "license": "Apache-2.0"
+    },
+    {
+      "source": "NOTICE",
+      "output": "NOTICE",
+      "package": "Wave",
+      "license": "Apache-2.0"
+    },
+    {
+      "source": "hyprlane/legal/THIRD_PARTY_NOTICES.txt",
+      "output": "THIRD_PARTY_NOTICES.txt",
+      "package": "Hyprlane Wave-derived core",
+      "license": "Apache-2.0"
+    },
+    {
+      "source": "node_modules/@fontsource-variable/inter/LICENSE",
+      "output": "licenses/Inter-OFL-1.1.txt",
+      "package": "@fontsource-variable/inter@5.2.8",
+      "license": "OFL-1.1"
+    },
+    {
+      "source": "node_modules/@fontsource/jetbrains-mono/LICENSE",
+      "output": "licenses/JetBrains-Mono-OFL-1.1.txt",
+      "package": "@fontsource/jetbrains-mono@5.2.8",
+      "license": "OFL-1.1"
+    },
+    {
+      "source": "node_modules/@phosphor-icons/web/LICENSE",
+      "output": "licenses/Phosphor-Icons-MIT.txt",
+      "package": "@phosphor-icons/web@2.1.2",
+      "license": "MIT"
+    }
+  ]
+}

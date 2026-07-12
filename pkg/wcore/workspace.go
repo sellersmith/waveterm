@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/eventbus"
 	"github.com/wavetermdev/waveterm/pkg/telemetry"
 	"github.com/wavetermdev/waveterm/pkg/telemetry/telemetrydata"
@@ -197,6 +198,10 @@ func getTabBackground() string {
 
 var tabNameRe = regexp.MustCompile(`^T(\d+)$`)
 
+func shouldApplyInitialTabLayout(isInitialLaunch bool) bool {
+	return !isInitialLaunch || policy.IsEmbedded()
+}
+
 // getNextTabName returns the next auto-generated tab name (e.g. "T3") given a
 // slice of existing tab names. It filters to names matching T[N] where N is a
 // positive integer, finds the maximum N, and returns T[max+1]. If no matching
@@ -249,7 +254,7 @@ func CreateTab(ctx context.Context, workspaceId string, tabName string, activate
 	}
 
 	// No need to apply an initial layout for the initial launch, since the starter layout will get applied after onboarding modal dismissal
-	if !isInitialLaunch {
+	if shouldApplyInitialTabLayout(isInitialLaunch) {
 		err = ApplyPortableLayout(ctx, tab.OID, GetNewTabLayout(), true)
 		if err != nil {
 			return tab.OID, fmt.Errorf("error applying new tab layout: %w", err)

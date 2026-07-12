@@ -1,9 +1,9 @@
 // Copyright 2026, Command Line Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+import { isPreviewWindow } from "@/app/store/windowtype";
 import type { WshClient } from "@/app/store/wshclient";
 import { RpcApi } from "@/app/store/wshclientapi";
-import { isPreviewWindow } from "@/app/store/windowtype";
 import { isBlank } from "@/util/util";
 import { Subject } from "rxjs";
 
@@ -127,6 +127,11 @@ function getFileSubject(zoneId: string, fileName: string): SubjectWithRef<WSFile
     return subject;
 }
 
+function publishFileSubject(data: WSFileEventData) {
+    const subject = fileSubjects.get(data.zoneid + "|" + data.filename);
+    subject?.next(data);
+}
+
 function handleWaveEvent(event: WaveEvent) {
     // console.log("handleWaveEvent", event);
     const subjects = waveEventSubjects.get(event.event);
@@ -150,6 +155,7 @@ function handleWaveEvent(event: WaveEvent) {
 export {
     getFileSubject,
     handleWaveEvent,
+    publishFileSubject,
     setWpsRpcClient,
     waveEventSubscribeSingle,
     waveEventUnsubscribe,

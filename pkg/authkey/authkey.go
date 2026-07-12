@@ -4,9 +4,12 @@
 package authkey
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 	"os"
+
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 )
 
 var authkey string
@@ -19,18 +22,22 @@ func ValidateIncomingRequest(r *http.Request) error {
 	if reqAuthKey == "" {
 		return fmt.Errorf("no x-authkey header")
 	}
-	if reqAuthKey != GetAuthKey() {
+	if subtle.ConstantTimeCompare([]byte(reqAuthKey), []byte(GetAuthKey())) != 1 {
 		return fmt.Errorf("x-authkey header is invalid")
 	}
 	return nil
 }
 
 func SetAuthKeyFromEnv() error {
-	authkey = os.Getenv(WaveAuthKeyEnv)
-	if authkey == "" {
-		return fmt.Errorf("no auth key found in environment variables")
+	if policy.IsEmbedded() {
+		authkey = policy.Current().AuthKey
+	} else {
+		authkey = os.Getenv(WaveAuthKeyEnv)
 	}
 	os.Unsetenv(WaveAuthKeyEnv)
+	if authkey == "" {
+		return fmt.Errorf("no auth key found in startup bootstrap")
+	}
 	return nil
 }
 

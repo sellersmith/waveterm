@@ -13,7 +13,15 @@ import { useEffect } from "react";
 import * as semver from "semver";
 import { getModalComponent } from "./modalregistry";
 
+function isHyprlaneEmbedded(): boolean {
+    return (
+        typeof window !== "undefined" &&
+        (window as Window & { hyprlaneWave?: unknown }).hyprlaneWave != null
+    );
+}
+
 const ModalsRenderer = () => {
+    const embedded = isHyprlaneEmbedded();
     const clientData = jotai.useAtomValue(ClientModel.getInstance().clientAtom);
     const [newInstallOnboardingOpen, setNewInstallOnboardingOpen] = jotai.useAtom(modalsModel.newInstallOnboardingOpen);
     const [upgradeOnboardingOpen, setUpgradeOnboardingOpen] = jotai.useAtom(modalsModel.upgradeOnboardingOpen);
@@ -25,20 +33,20 @@ const ModalsRenderer = () => {
             rtn.push(<ModalComponent key={modal.displayName} {...modal.props} />);
         }
     }
-    if (newInstallOnboardingOpen) {
+    if (!embedded && newInstallOnboardingOpen) {
         rtn.push(<NewInstallOnboardingModal key={NewInstallOnboardingModal.displayName} />);
     }
-    if (upgradeOnboardingOpen) {
+    if (!embedded && upgradeOnboardingOpen) {
         rtn.push(<UpgradeOnboardingModal key={UpgradeOnboardingModal.displayName} />);
     }
     useEffect(() => {
-        if (!clientData.tosagreed) {
+        if (!embedded && !clientData.tosagreed) {
             setNewInstallOnboardingOpen(true);
         }
-    }, [clientData]);
+    }, [clientData, embedded, setNewInstallOnboardingOpen]);
 
     useEffect(() => {
-        if (!globalPrimaryTabStartup) {
+        if (embedded || !globalPrimaryTabStartup) {
             return;
         }
         if (!clientData.tosagreed) {
@@ -48,7 +56,7 @@ const ModalsRenderer = () => {
         if (semver.lt(lastVersion, CurrentOnboardingVersion)) {
             setUpgradeOnboardingOpen(true);
         }
-    }, []);
+    }, [embedded, setUpgradeOnboardingOpen]);
     useEffect(() => {
         globalStore.set(atoms.modalOpen, rtn.length > 0);
     }, [rtn]);

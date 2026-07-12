@@ -98,9 +98,10 @@ func dbWriteCacheEntry(ctx context.Context, file *WaveFile, dataEntries map[int]
 			// since deletion is synchronous this stops us from writing to a deleted file
 			return os.ErrNotExist
 		}
-		// we don't update CreatedTs or Opts
-		query = `UPDATE db_wave_file SET size = ?, modts = ?, meta = ? WHERE zoneid = ? AND name = ?`
-		tx.Exec(query, file.Size, file.ModTs, dbutil.QuickJson(file.Meta), file.ZoneId, file.Name)
+		// CreatedTs is immutable. Opts may change during an embedded terminal
+		// history migration.
+		query = `UPDATE db_wave_file SET size = ?, modts = ?, opts = ?, meta = ? WHERE zoneid = ? AND name = ?`
+		tx.Exec(query, file.Size, file.ModTs, dbutil.QuickJson(file.Opts), dbutil.QuickJson(file.Meta), file.ZoneId, file.Name)
 		if replace {
 			query = `DELETE FROM db_file_data WHERE zoneid = ? AND name = ?`
 			tx.Exec(query, file.ZoneId, file.Name)

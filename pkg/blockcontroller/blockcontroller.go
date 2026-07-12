@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
+	"github.com/wavetermdev/waveterm/hyprlane/sessionpolicy"
 	"github.com/wavetermdev/waveterm/pkg/blocklogger"
 	"github.com/wavetermdev/waveterm/pkg/filestore"
 	"github.com/wavetermdev/waveterm/pkg/jobcontroller"
@@ -49,6 +52,7 @@ const (
 
 const DefaultTimeout = 2 * time.Second
 const DefaultGracefulKillWait = 400 * time.Millisecond
+const processGroupReapSettleWait = 25 * time.Millisecond
 
 type BlockInputUnion struct {
 	InputData []byte            `json:"inputdata,omitempty"`
@@ -76,14 +80,24 @@ type Controller interface {
 
 // Registry for all controllers
 var (
-	controllerRegistry  = make(map[string]Controller)
-	registryLock        sync.RWMutex
-	blockResyncMutexMap = ds.MakeSyncMap[*sync.Mutex]()
+	controllerRegistry           = make(map[string]Controller)
+	controllerTabIDs             = make(map[string]string)
+	registryLock                 sync.RWMutex
+	blockResyncMutexMap          = ds.MakeSyncMap[*sync.Mutex]()
+	tabControllerMutexMap        = ds.MakeSyncMap[*sync.RWMutex]()
+	localPTYCoordinator          = sessionpolicy.DefaultCoordinator
+	embeddedSessionPolicyEnabled = policy.IsEmbedded
 )
 
 func getBlockResyncMutex(blockId string) *sync.Mutex {
 	return blockResyncMutexMap.GetOrCreate(blockId, func() *sync.Mutex {
 		return &sync.Mutex{}
+	})
+}
+
+func getTabControllerMutex(tabID string) *sync.RWMutex {
+	return tabControllerMutexMap.GetOrCreate(tabID, func() *sync.RWMutex {
+		return &sync.RWMutex{}
 	})
 }
 
@@ -94,7 +108,7 @@ func getController(blockId string) Controller {
 	return controllerRegistry[blockId]
 }
 
-func registerController(blockId string, controller Controller) {
+func registerController(tabID string, blockId string, controller Controller) {
 	var existingController Controller
 
 	registryLock.Lock()
@@ -103,6 +117,7 @@ func registerController(blockId string, controller Controller) {
 		existingController = existing
 	}
 	controllerRegistry[blockId] = controller
+	controllerTabIDs[blockId] = tabID
 	registryLock.Unlock()
 
 	if existingController != nil {
@@ -115,6 +130,7 @@ func deleteController(blockId string) {
 	registryLock.Lock()
 	defer registryLock.Unlock()
 	delete(controllerRegistry, blockId)
+	delete(controllerTabIDs, blockId)
 }
 
 func getAllControllers() map[string]Controller {
@@ -129,6 +145,11 @@ func getAllControllers() map[string]Controller {
 }
 
 func InitBlockController() {
+	if embeddedSessionPolicyEnabled() {
+		if err := localPTYCoordinator.SetReapTab(destroyBlockControllersForTab); err != nil {
+			log.Printf("[sessionpolicy] configuring tab reaper: %v\n", err)
+		}
+	}
 	rpcClient := wshclient.GetBareRpcClient()
 	rpcClient.EventListener.On(wps.Event_BlockClose, handleBlockCloseEvent)
 	wshclient.EventSubCommand(rpcClient, wps.SubscriptionRequest{
@@ -152,6 +173,21 @@ func ResyncController(ctx context.Context, tabId string, blockId string, rtOpts 
 	if tabId == "" || blockId == "" {
 		return fmt.Errorf("invalid tabId or blockId passed to ResyncController")
 	}
+	if embeddedSessionPolicyEnabled() {
+		if err := validateControllerTabOwnership(tabId, blockId, func(id string) (string, error) {
+			return wstore.DBFindTabForBlockId(ctx, id)
+		}); err != nil {
+			return err
+		}
+	}
+	tabMutex := getTabControllerMutex(tabId)
+	tabMutex.RLock()
+	defer tabMutex.RUnlock()
+	if embeddedSessionPolicyEnabled() {
+		if err := localPTYCoordinator.AuthorizeControllerOperation(tabId); err != nil {
+			return fmt.Errorf("cannot resync controller for detached tab: %w", err)
+		}
+	}
 
 	mu := getBlockResyncMutex(blockId)
 	mu.Lock()
@@ -164,6 +200,14 @@ func ResyncController(ctx context.Context, tabId string, blockId string, rtOpts 
 
 	controllerName := blockData.Meta.GetString(waveobj.MetaKey_Controller, "")
 	connName := blockData.Meta.GetString(waveobj.MetaKey_Connection, "")
+	if err := validateControllerPolicy(
+		embeddedSessionPolicyEnabled(),
+		controllerName,
+		connName,
+		policy.AllowsController,
+	); err != nil {
+		return err
+	}
 
 	// Get existing controller
 	existing := getController(blockId)
@@ -250,11 +294,11 @@ func ResyncController(ctx context.Context, tabId string, blockId string, rtOpts 
 			} else {
 				controller = MakeShellController(tabId, blockId, controllerName, connName)
 			}
-			registerController(blockId, controller)
+			registerController(tabId, blockId, controller)
 
 		case BlockController_Tsunami:
 			controller = MakeTsunamiController(tabId, blockId, connName)
-			registerController(blockId, controller)
+			registerController(tabId, blockId, controller)
 
 		default:
 			return fmt.Errorf("unknown controller type %q", controllerName)
@@ -264,6 +308,9 @@ func ResyncController(ctx context.Context, tabId string, blockId string, rtOpts 
 	// Check if we need to start/restart
 	status := controller.GetRuntimeStatus()
 	if status.ShellProcStatus == Status_Init {
+		if err := reserveLocalPTY(tabId, blockId, controllerName, connName); err != nil {
+			return fmt.Errorf("cannot start local terminal: %w", err)
+		}
 		// For shell/cmd, check connection status first (for non-local connections)
 		if controllerName == BlockController_Shell || controllerName == BlockController_Cmd {
 			if !conncontroller.IsLocalConnName(connName) {
@@ -277,10 +324,46 @@ func ResyncController(ctx context.Context, tabId string, blockId string, rtOpts 
 		// Start controller
 		err = controller.Start(ctx, blockData.Meta, rtOpts, force)
 		if err != nil {
+			if usesEmbeddedLocalPTYPolicy(controllerName, connName) {
+				localPTYCoordinator.Release(blockId)
+			}
 			return fmt.Errorf("error starting controller: %w", err)
 		}
 	}
 
+	return nil
+}
+
+func validateControllerPolicy(
+	embedded bool,
+	controllerName string,
+	connName string,
+	allowsController func(string) bool,
+) error {
+	if !embedded || controllerName == "" {
+		return nil
+	}
+	if !allowsController(controllerName) {
+		return fmt.Errorf("controller %q denied by host policy", controllerName)
+	}
+	if !conncontroller.IsLocalConnName(connName) {
+		return fmt.Errorf("connection %q denied by host policy", connName)
+	}
+	return nil
+}
+
+func validateControllerTabOwnership(
+	tabID string,
+	blockID string,
+	findTab func(string) (string, error),
+) error {
+	serverTabID, err := findTab(blockID)
+	if err != nil {
+		return fmt.Errorf("finding server-owned tab for block: %w", err)
+	}
+	if serverTabID != tabID {
+		return fmt.Errorf("block does not belong to requested tab")
+	}
 	return nil
 }
 
@@ -293,13 +376,113 @@ func GetBlockControllerRuntimeStatus(blockId string) *BlockControllerRuntimeStat
 }
 
 func DestroyBlockController(blockId string) {
-	controller := getController(blockId)
-	if controller == nil {
+	if !embeddedSessionPolicyEnabled() {
+		controller := getController(blockId)
+		if controller == nil {
+			return
+		}
+		controller.Stop(true, Status_Done, true)
+		wstore.DeleteRTInfo(waveobj.MakeORef(waveobj.OType_Block, blockId))
+		deleteController(blockId)
 		return
 	}
-	controller.Stop(true, Status_Done, true)
+
+	registryLock.Lock()
+	controller := controllerRegistry[blockId]
+	if controller == nil {
+		registryLock.Unlock()
+		return
+	}
+	delete(controllerRegistry, blockId)
+	delete(controllerTabIDs, blockId)
+	registryLock.Unlock()
+
+	stopEmbeddedController(controller)
 	wstore.DeleteRTInfo(waveobj.MakeORef(waveobj.OType_Block, blockId))
-	deleteController(blockId)
+	localPTYCoordinator.Release(blockId)
+}
+
+func stopEmbeddedController(controller Controller) {
+	controller.Stop(true, Status_Done, true)
+	shellController, isShellController := controller.(*ShellController)
+	if !isShellController || shellController.RunLock == nil {
+		return
+	}
+	// ShellController.Start schedules process setup asynchronously. If teardown
+	// wins just after run() observed Init, the first Stop can complete before the
+	// PTY exists. Wait for setup to quiesce and stop once more so a late process
+	// cannot escape the tab reap.
+	for shellController.RunLock.Load() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	controller.Stop(true, Status_Done, true)
+}
+
+func destroyBlockControllersForTab(tabID string) {
+	tabMutex := getTabControllerMutex(tabID)
+	tabMutex.Lock()
+	defer tabMutex.Unlock()
+	reapStartedAt := time.Now()
+	registryLock.RLock()
+	blockIDs := make([]string, 0)
+	for blockID, controllerTabID := range controllerTabIDs {
+		if controllerTabID == tabID {
+			blockIDs = append(blockIDs, blockID)
+		}
+	}
+	registryLock.RUnlock()
+	if len(blockIDs) == 0 {
+		return
+	}
+	sort.Strings(blockIDs)
+	var waitGroup sync.WaitGroup
+	for _, blockID := range blockIDs {
+		waitGroup.Add(1)
+		go func(id string) {
+			defer waitGroup.Done()
+			DestroyBlockController(id)
+		}(blockID)
+	}
+	waitGroup.Wait()
+	// ShellProc escalates against its captured process group asynchronously.
+	// A shell leader can exit before a descendant that ignored HUP, so keep the
+	// admission barrier closed until that escalation has had time to run.
+	reapDeadline := reapStartedAt.Add(DefaultGracefulKillWait + processGroupReapSettleWait)
+	if remaining := time.Until(reapDeadline); remaining > 0 {
+		time.Sleep(remaining)
+	}
+}
+
+func reconcileFinishedLocalPTYs() {
+	registryLock.RLock()
+	controllers := make(map[string]Controller, len(controllerRegistry))
+	for blockID, controller := range controllerRegistry {
+		controllers[blockID] = controller
+	}
+	registryLock.RUnlock()
+	for blockID, controller := range controllers {
+		if !localPTYCoordinator.HasPTY(blockID) {
+			continue
+		}
+		status := controller.GetRuntimeStatus()
+		if status == nil || status.ShellProcStatus == Status_Done {
+			localPTYCoordinator.Release(blockID)
+		}
+	}
+}
+
+func reserveLocalPTY(tabID string, blockID string, controllerName string, connName string) error {
+	if !usesEmbeddedLocalPTYPolicy(controllerName, connName) {
+		return nil
+	}
+	reconcileFinishedLocalPTYs()
+	return localPTYCoordinator.Admit(tabID, blockID)
+}
+
+func usesEmbeddedLocalPTYPolicy(controllerName string, connName string) bool {
+	return embeddedSessionPolicyEnabled() &&
+		(controllerName == BlockController_Shell || controllerName == BlockController_Cmd) &&
+		conncontroller.IsLocalConnName(connName)
 }
 
 func sendConnMonitorInputNotification(controller Controller) {
@@ -344,6 +527,65 @@ func StopAllBlockControllersForShutdown() {
 	}
 }
 
+func stopBlockControllersForShutdownAndWait(
+	ctx context.Context,
+	controllers map[string]Controller,
+	cleanup func(string),
+	processGroupGracePeriod time.Duration,
+) error {
+	var waitGroup sync.WaitGroup
+	for blockID, controller := range controllers {
+		status := controller.GetRuntimeStatus()
+		if status == nil || status.ShellProcStatus != Status_Running {
+			continue
+		}
+		waitGroup.Add(1)
+		go func(id string, current Controller) {
+			defer waitGroup.Done()
+			current.Stop(true, Status_Done, false)
+			cleanup(id)
+		}(blockID, controller)
+	}
+
+	controllersStopped := make(chan struct{})
+	go func() {
+		waitGroup.Wait()
+		close(controllersStopped)
+	}()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-controllersStopped:
+	}
+
+	if processGroupGracePeriod <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(processGroupGracePeriod)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// StopAllBlockControllersForShutdownAndWait stops every running controller and
+// keeps the server alive long enough for local PTY process-group escalation.
+// The caller owns the shutdown deadline through ctx.
+func StopAllBlockControllersForShutdownAndWait(ctx context.Context) error {
+	return stopBlockControllersForShutdownAndWait(
+		ctx,
+		getAllControllers(),
+		func(blockID string) {
+			wstore.DeleteRTInfo(waveobj.MakeORef(waveobj.OType_Block, blockID))
+		},
+		DefaultGracefulKillWait,
+	)
+}
+
 func getBoolFromMeta(meta map[string]any, key string, def bool) bool {
 	ival, found := meta[key]
 	if !found || ival == nil {
@@ -369,21 +611,27 @@ func getTermSize(bdata *waveobj.Block) waveobj.TermSize {
 func HandleAppendBlockFile(blockId string, blockFile string, data []byte) error {
 	ctx, cancelFn := context.WithTimeout(context.Background(), DefaultTimeout)
 	defer cancelFn()
-	err := filestore.WFS.AppendData(ctx, blockId, blockFile, data)
+	startOffset, endOffset, generation, err := filestore.WFS.AppendDataWithRangeAndGeneration(ctx, blockId, blockFile, data)
 	if err != nil {
 		return fmt.Errorf("error appending to blockfile: %w", err)
+	}
+	fileEvent := &wps.WSFileEventData{
+		ZoneId:   blockId,
+		FileName: blockFile,
+		FileOp:   wps.FileOp_Append,
+		Data64:   base64.StdEncoding.EncodeToString(data),
+	}
+	if policy.IsEmbedded() {
+		fileEvent.StartOffset = &startOffset
+		fileEvent.EndOffset = &endOffset
+		fileEvent.Generation = &generation
 	}
 	wps.Broker.Publish(wps.WaveEvent{
 		Event: wps.Event_BlockFile,
 		Scopes: []string{
 			waveobj.MakeORef(waveobj.OType_Block, blockId).String(),
 		},
-		Data: &wps.WSFileEventData{
-			ZoneId:   blockId,
-			FileName: blockFile,
-			FileOp:   wps.FileOp_Append,
-			Data64:   base64.StdEncoding.EncodeToString(data),
-		},
+		Data: fileEvent,
 	})
 	return nil
 }
@@ -405,14 +653,22 @@ func HandleTruncateBlockFile(blockId string) error {
 	if err != nil {
 		log.Printf("error deleting cache file (continuing): %v\n", err)
 	}
+	truncateEvent := &wps.WSFileEventData{
+		ZoneId:   blockId,
+		FileName: wavebase.BlockFile_Term,
+		FileOp:   wps.FileOp_Truncate,
+	}
+	if policy.IsEmbedded() {
+		if file, statErr := filestore.WFS.Stat(ctx, blockId, wavebase.BlockFile_Term); statErr == nil {
+			if generation, ok := filestore.TerminalHistoryGeneration(file); ok {
+				truncateEvent.Generation = &generation
+			}
+		}
+	}
 	wps.Broker.Publish(wps.WaveEvent{
 		Event:  wps.Event_BlockFile,
 		Scopes: []string{waveobj.MakeORef(waveobj.OType_Block, blockId).String()},
-		Data: &wps.WSFileEventData{
-			ZoneId:   blockId,
-			FileName: wavebase.BlockFile_Term,
-			FileOp:   wps.FileOp_Truncate,
-		},
+		Data:   truncateEvent,
 	})
 	return nil
 

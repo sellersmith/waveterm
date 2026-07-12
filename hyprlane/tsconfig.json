@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.json",
+  "include": [
+    "build/**/*.ts",
+    "entry/**/*.ts",
+    "host/**/*.ts",
+    "preload/**/*.ts"
+  ],
+  "exclude": ["../node_modules", "../dist", "entry/wave.ts"],
+  "compilerOptions": {
+    "allowJs": false,
+    "lib": ["DOM", "DOM.Iterable", "ES2024"],
+    "module": "ESNext",
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2024"
+  }
+}

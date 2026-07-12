@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/service/blockservice"
 	"github.com/wavetermdev/waveterm/pkg/service/clientservice"
 	"github.com/wavetermdev/waveterm/pkg/service/objectservice"
@@ -29,6 +30,8 @@ var ServiceMap = map[string]any{
 	"workspace": &workspaceservice.WorkspaceService{},
 	"userinput": &userinputservice.UserInputService{},
 }
+
+var serviceCallAllowed = policy.AllowsServiceCall
 
 var contextRType = reflect.TypeOf((*context.Context)(nil)).Elem()
 var errorRType = reflect.TypeOf((*error)(nil)).Elem()
@@ -315,6 +318,13 @@ func webErrorRtn(err error) *WebReturnType {
 }
 
 func CallService(ctx context.Context, webCall WebCallType) *WebReturnType {
+	if !serviceCallAllowed(webCall.Service, webCall.Method) {
+		return webErrorRtn(fmt.Errorf(
+			"service call %s.%s denied by host policy",
+			webCall.Service,
+			webCall.Method,
+		))
+	}
 	svcObj := ServiceMap[webCall.Service]
 	if svcObj == nil {
 		return webErrorRtn(fmt.Errorf("invalid service: %q", webCall.Service))

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/panichandler"
 	"github.com/wavetermdev/waveterm/pkg/telemetry/telemetrydata"
 	"github.com/wavetermdev/waveterm/pkg/util/daystr"
@@ -112,6 +113,9 @@ func AutoUpdateChannel() string {
 
 // Wraps UpdateCurrentActivity, spawns goroutine, and logs errors
 func GoUpdateActivityWrap(update wshrpc.ActivityUpdate, debugStr string) {
+	if !policy.AllowsTelemetryCollection() {
+		return
+	}
 	go func() {
 		defer func() {
 			panichandler.PanicHandlerNoTelemetry("GoUpdateActivityWrap", recover())
@@ -253,6 +257,9 @@ func TruncateActivityTEventForShutdown(ctx context.Context) error {
 }
 
 func GoRecordTEventWrap(tevent *telemetrydata.TEvent) {
+	if !policy.AllowsTelemetryCollection() {
+		return
+	}
 	if tevent == nil || tevent.Event == "" {
 		return
 	}
@@ -271,6 +278,9 @@ func GoRecordTEventWrap(tevent *telemetrydata.TEvent) {
 }
 
 func RecordTEvent(ctx context.Context, tevent *telemetrydata.TEvent) error {
+	if !policy.AllowsTelemetryCollection() {
+		return nil
+	}
 	if tevent == nil {
 		return nil
 	}
@@ -345,6 +355,9 @@ func MarkTEventsAsUploaded(ctx context.Context, events []*telemetrydata.TEvent) 
 }
 
 func UpdateActivity(ctx context.Context, update wshrpc.ActivityUpdate) error {
+	if !policy.AllowsTelemetryCollection() {
+		return nil
+	}
 	now := time.Now()
 	dayStr := daystr.GetCurDayStr()
 	txErr := wstore.WithTx(ctx, func(tx *wstore.TxWrap) error {

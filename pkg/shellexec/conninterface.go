@@ -34,24 +34,34 @@ type ConnInterface interface {
 }
 
 type CmdWrap struct {
-	Cmd      *exec.Cmd
-	IsShell  bool
-	WaitOnce *sync.Once
-	WaitErr  error
+	Cmd          *exec.Cmd
+	IsShell      bool
+	WaitOnce     *sync.Once
+	WaitErr      error
+	signalTarget cmdSignalTarget
 	pty.Pty
+}
+
+type cmdSignalTarget struct {
+	process        *os.Process
+	processGroupID int
 }
 
 func MakeCmdWrap(cmd *exec.Cmd, cmdPty pty.Pty, isShell bool) CmdWrap {
 	return CmdWrap{
-		Cmd:      cmd,
-		IsShell:  isShell,
-		WaitOnce: &sync.Once{},
-		Pty:      cmdPty,
+		Cmd:          cmd,
+		IsShell:      isShell,
+		WaitOnce:     &sync.Once{},
+		signalTarget: makeCmdSignalTarget(cmd.Process),
+		Pty:          cmdPty,
 	}
 }
 
 func (cw CmdWrap) Kill() {
-	cw.Cmd.Process.Kill()
+	if cw.Cmd.Process == nil {
+		return
+	}
+	_ = killCmdSignalTarget(cw.signalTarget)
 }
 
 func (cw CmdWrap) Wait() error {
@@ -87,26 +97,27 @@ func (cw CmdWrap) KillGraceful(timeout time.Duration) {
 	if cw.Cmd.Process == nil {
 		return
 	}
-	if cw.Cmd.ProcessState != nil && cw.Cmd.ProcessState.Exited() {
+	if cw.Cmd.ProcessState != nil && cw.Cmd.ProcessState.Exited() && cw.signalTarget.processGroupID == 0 {
 		return
 	}
 	if runtime.GOOS == "windows" {
 		cw.Cmd.Process.Kill()
 		return
 	}
+	target := cw.signalTarget
 	if cw.IsShell {
-		unixutil.SignalHup(cw.Cmd.Process.Pid)
+		_ = hupCmdSignalTarget(target)
 	} else {
-		unixutil.SignalTerm(cw.Cmd.Process.Pid)
+		_ = termCmdSignalTarget(target)
 	}
 	go func() {
 		defer func() {
 			panichandler.PanicHandler("KillGraceful:Kill", recover())
 		}()
 		time.Sleep(timeout)
-		if cw.Cmd.ProcessState == nil || !cw.Cmd.ProcessState.Exited() {
-			cw.Cmd.Process.Kill() // force kill if it is already not exited
-		}
+		// Always escalate the captured process group. The shell leader may have
+		// exited after HUP/TERM while a descendant that ignored it remains alive.
+		_ = killCmdSignalTarget(target)
 	}()
 }
 

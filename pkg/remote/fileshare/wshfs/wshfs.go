@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/wavetermdev/waveterm/hyprlane/policy"
 	"github.com/wavetermdev/waveterm/pkg/remote/connparse"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc/wshclient"
@@ -37,7 +38,17 @@ func parseConnection(ctx context.Context, path string) (*connparse.Connection, e
 	if err != nil {
 		return nil, fmt.Errorf("error parsing connection %s: %w", path, err)
 	}
+	if err := validateFileConnectionPolicy(policy.IsEmbedded(), conn.Host); err != nil {
+		return nil, err
+	}
 	return conn, nil
+}
+
+func validateFileConnectionPolicy(embedded bool, host string) error {
+	if embedded && host != wshrpc.LocalConnName {
+		return fmt.Errorf("file connection %q denied by host policy", host)
+	}
+	return nil
 }
 
 func Read(ctx context.Context, data wshrpc.FileData) (*wshrpc.FileData, error) {

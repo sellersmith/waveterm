@@ -2000,6 +2000,9 @@ declare global {
         filename: string;
         fileop: string;
         data64: string;
+        startoffset?: number;
+        endoffset?: number;
+        generation?: number;
     };
 
     // webcmd.WSRpcCommand
