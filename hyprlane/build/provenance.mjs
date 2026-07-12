@@ -15,7 +15,7 @@ const SOURCE_PATHS = [
   "hyprlane",
   "package-lock.json",
 ]
-const CANONICAL_ORIGIN = "https://github.com/hyprlane/waveterm.git"
+const CANONICAL_ORIGIN = "https://github.com/sellersmith/waveterm.git"
 
 function git(cwd, args, encoding = "utf8") {
   return execFileSync("git", args, {

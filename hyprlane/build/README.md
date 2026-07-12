@@ -23,7 +23,7 @@ build is running.
 `HYPRLANE_WAVE_LOCAL_SYNTHETIC=1` produces a development-only manifest with
 `releaseEligible: false`. A release build must omit that flag, set
 `HYPRLANE_WAVE_FORK_COMMIT` to the reviewed fork commit, and prove that the
-commit is advertised by the canonical Hyprlane fork remote.
+commit is advertised by the canonical SellerSmith fork remote.
 
 ## Payload
 
