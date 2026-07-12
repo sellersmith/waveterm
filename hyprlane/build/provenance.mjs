@@ -16,6 +16,10 @@ const SOURCE_PATHS = [
   "package-lock.json",
 ]
 const CANONICAL_ORIGIN = "https://github.com/sellersmith/waveterm.git"
+const CANONICAL_ORIGINS = new Set([
+  CANONICAL_ORIGIN,
+  "git@github.com:sellersmith/waveterm.git",
+])
 
 function git(cwd, args, encoding = "utf8") {
   return execFileSync("git", args, {
@@ -177,7 +181,7 @@ export async function verifyBuildProvenance(options) {
     // Local probe commits intentionally have no canonical origin yet.
   }
   let committed = false
-  if (originUrl === CANONICAL_ORIGIN) {
+  if (CANONICAL_ORIGINS.has(originUrl)) {
     try {
       const readRefs = options.readCanonicalRefs ?? readCanonicalRemoteRefs
       committed = refsAdvertiseCommit(readRefs(), forkCommit)

@@ -22,7 +22,7 @@ async function createRepository() {
     "remote",
     "add",
     "origin",
-    "https://github.com/sellersmith/waveterm.git",
+    "git@github.com:sellersmith/waveterm.git",
   ])
   await mkdir(join(cwd, "hyprlane/host"), { recursive: true })
   const files = {
