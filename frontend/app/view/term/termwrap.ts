@@ -650,21 +650,19 @@ export class TermWrap {
     }
 
     isActiveForReplay(): boolean {
-        return this.nodeModel != null && globalStore.get(this.nodeModel.isFocused) && readEmbeddedSurfaceActivity();
+        return readEmbeddedSurfaceActivity();
     }
 
     async waitUntilActiveForReplay(): Promise<void> {
-        if (!isHyprlaneWaveEmbedded() || this.nodeModel == null || this.isActiveForReplay()) {
+        if (!isHyprlaneWaveEmbedded() || this.isActiveForReplay()) {
             return;
         }
         await new Promise<void>((resolve) => {
             let settled = false;
-            let unsubscribe = () => {};
             let unsubscribeSurfaceActivity = () => {};
             const finish = () => {
                 if (settled) return;
                 settled = true;
-                unsubscribe();
                 unsubscribeSurfaceActivity();
                 this.replayActivationCancel = null;
                 resolve();
@@ -674,7 +672,6 @@ export class TermWrap {
                     finish();
                 }
             };
-            unsubscribe = globalStore.sub(this.nodeModel.isFocused, checkActive);
             unsubscribeSurfaceActivity = subscribeEmbeddedSurfaceActivity(checkActive);
             this.replayActivationCancel = finish;
             if (this.isActiveForReplay() || this.disposed) {
@@ -763,6 +760,14 @@ export class TermWrap {
 
     async applyTerminalAppend(append: TerminalAppend): Promise<void> {
         if (this.disposed) return;
+        // Activity can flip while an append waits behind replay work. Re-check
+        // here (not only at event receipt) so a newly hidden surface keeps the
+        // bounded coalescing path instead of writing into an invisible xterm.
+        if (isHyprlaneWaveEmbedded() && this.loaded && !this.isActiveForReplay()) {
+            this.hiddenReplayChanges.mark("append", append.generation);
+            this.scheduleHiddenTerminalDrain();
+            return;
+        }
         if (terminalGenerationChanged(this.ptyGeneration, append.generation)) {
             this.applyTerminalTruncate(append.generation);
             await this.loadRawTerminalTail(0);

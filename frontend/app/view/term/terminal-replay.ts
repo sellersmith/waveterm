@@ -124,6 +124,11 @@ export function readEmbeddedSurfaceActivity(root: SurfaceActivityRoot = defaultS
     }
 }
 
+/**
+ * A hosted Wave surface contains every currently visible split pane. Focus
+ * selects only the input target, so it must not prevent sibling terminals from
+ * processing output while that surface is active.
+ */
 export function subscribeEmbeddedSurfaceActivity(
     listener: (active: boolean) => void,
     root: SurfaceActivityRoot = defaultSurfaceActivityRoot()

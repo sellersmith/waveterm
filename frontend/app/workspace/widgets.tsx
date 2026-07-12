@@ -18,7 +18,7 @@ import {
 } from "@floating-ui/react";
 import clsx from "clsx";
 import { useAtomValue } from "jotai";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 export type WidgetsEnv = WaveEnvSubset<{
     isDev: WaveEnv["isDev"];
@@ -141,10 +141,11 @@ const AppsFloatingWindow = memo(({ isOpen, onClose, referenceElement }: Floating
         placement: "left-start",
         middleware: [offset(-2), shift({ padding: 12 })],
         whileElementsMounted: autoUpdate,
-        elements: {
-            reference: referenceElement,
-        },
     });
+
+    useLayoutEffect(() => {
+        refs.setReference(referenceElement);
+    }, [referenceElement, refs]);
 
     const dismiss = useDismiss(context);
     const { getFloatingProps } = useInteractions([dismiss]);
@@ -262,10 +263,11 @@ const SettingsFloatingWindow = memo(
             placement: "left-start",
             middleware: [offset(-2), shift({ padding: 12 })],
             whileElementsMounted: autoUpdate,
-            elements: {
-                reference: referenceElement,
-            },
         });
+
+        useLayoutEffect(() => {
+            refs.setReference(referenceElement);
+        }, [referenceElement, refs]);
 
         const dismiss = useDismiss(context);
         const { getFloatingProps } = useInteractions([dismiss]);
@@ -385,9 +387,9 @@ const Widgets = memo(() => {
     const widgets = sortByDisplayOrder(filteredWidgets);
 
     const [isAppsOpen, setIsAppsOpen] = useState(false);
-    const appsButtonRef = useRef<HTMLDivElement>(null);
+    const [appsButtonElement, setAppsButtonElement] = useState<HTMLDivElement | null>(null);
     const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-    const settingsButtonRef = useRef<HTMLDivElement>(null);
+    const [settingsButtonElement, setSettingsButtonElement] = useState<HTMLDivElement | null>(null);
 
     const checkModeNeeded = useCallback(() => {
         if (!containerRef.current || !measurementRef.current) return;
@@ -473,7 +475,7 @@ const Widgets = memo(() => {
                         <div className="grid grid-cols-2 gap-0 w-full">
                             {env.isDev() || featureWaveAppBuilder ? (
                                 <div
-                                    ref={appsButtonRef}
+                                    ref={setAppsButtonElement}
                                     className="flex flex-col justify-center items-center w-full py-1.5 pr-0.5 text-secondary text-sm overflow-hidden rounded-sm hover:bg-hoverbg hover:text-white cursor-pointer"
                                     onClick={() => setIsAppsOpen(!isAppsOpen)}
                                 >
@@ -485,7 +487,7 @@ const Widgets = memo(() => {
                                 </div>
                             ) : null}
                             <div
-                                ref={settingsButtonRef}
+                                ref={setSettingsButtonElement}
                                 className="flex flex-col justify-center items-center w-full py-1.5 pr-0.5 text-secondary text-sm overflow-hidden rounded-sm hover:bg-hoverbg hover:text-white cursor-pointer"
                                 onClick={() => setIsSettingsOpen(!isSettingsOpen)}
                             >
@@ -512,7 +514,7 @@ const Widgets = memo(() => {
                         <div className="flex-grow" />
                         {env.isDev() || featureWaveAppBuilder ? (
                             <div
-                                ref={appsButtonRef}
+                                ref={setAppsButtonElement}
                                 className="flex flex-col justify-center items-center w-full py-1.5 pr-0.5 text-secondary text-lg overflow-hidden rounded-sm hover:bg-hoverbg hover:text-white cursor-pointer"
                                 onClick={() => setIsAppsOpen(!isAppsOpen)}
                             >
@@ -531,7 +533,7 @@ const Widgets = memo(() => {
                             </div>
                         ) : null}
                         <div
-                            ref={settingsButtonRef}
+                            ref={setSettingsButtonElement}
                             className="flex flex-col justify-center items-center w-full py-1.5 pr-0.5 text-secondary text-lg overflow-hidden rounded-sm hover:bg-hoverbg hover:text-white cursor-pointer"
                             onClick={() => setIsSettingsOpen(!isSettingsOpen)}
                         >
@@ -568,18 +570,18 @@ const Widgets = memo(() => {
                     </div>
                 ) : null}
             </div>
-            {(env.isDev() || featureWaveAppBuilder) && appsButtonRef.current && (
+            {(env.isDev() || featureWaveAppBuilder) && appsButtonElement && (
                 <AppsFloatingWindow
                     isOpen={isAppsOpen}
                     onClose={() => setIsAppsOpen(false)}
-                    referenceElement={appsButtonRef.current}
+                    referenceElement={appsButtonElement}
                 />
             )}
-            {settingsButtonRef.current && (
+            {settingsButtonElement && (
                 <SettingsFloatingWindow
                     isOpen={isSettingsOpen}
                     onClose={() => setIsSettingsOpen(false)}
-                    referenceElement={settingsButtonRef.current}
+                    referenceElement={settingsButtonElement}
                     hasConfigErrors={hasConfigErrors}
                 />
             )}
